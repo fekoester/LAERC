@@ -67,8 +67,11 @@ pip install -r requirements.txt
 This installs:
 
 torch
+
 transformers (for GPT-2 tokenizer)
+
 datasets (for OpenWebText)
+
 numpy, tqdm, etc.
 
 Make sure PyTorch is installed with CUDA support if you want GPU training (see PyTorch website for the correct pip index URL for your system).
