@@ -44,8 +44,10 @@ LAERC/
   .venv/         # local virtual environment (ignored)
 ```
 
-2. Installation
-2.1. Clone and create a virtual environment
+## 2. Installation
+## 2.1. Clone and create a virtual environment
+
+```text
 git clone git@github.com:fekoester/LAERC.git
 cd LAERC
 
@@ -58,7 +60,7 @@ pip install --upgrade pip
 
 2.2. Install dependencies
 pip install -r requirements.txt
-
+```
 
 This installs:
 
