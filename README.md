@@ -75,9 +75,9 @@ Make sure PyTorch is installed with CUDA support if you want GPU training (see P
 ##  3. Data preparation with GPT-2 tokenizer
 
 All datasets are converted to a simple memmapped format:
-train.bin – uint16 GPT-2 token ids for training
-val.bin – uint16 GPT-2 token ids for validation
-using the GPT-2 tokenizer (GPT2TokenizerFast from transformers).
+- train.bin – uint16 GPT-2 token ids for training
+- val.bin – uint16 GPT-2 token ids for validation
+- using the GPT-2 tokenizer (GPT2TokenizerFast from transformers).
 
 The main script is:
 ```text
@@ -113,12 +113,12 @@ python -m scripts.prepare_gpt2_tokens \
 
 This will:
 
-Read all .txt files under data/raw/
-Tokenize them using GPT-2 tokenizer
+- Read all .txt files under data/raw/
+- Tokenize them using GPT-2 tokenizer
 
 Write:
-data/shakespeare_tokens/train.bin
-data/shakespeare_tokens/val.bin
+- data/shakespeare_tokens/train.bin
+- data/shakespeare_tokens/val.bin
 
 Typical output:
 ```text
@@ -147,19 +147,19 @@ python -m scripts.train_openwebtext \
 
 Key arguments:
 
---data_dir – points to the tokenized dataset with train.bin / val.bin
---seq – sequence length (context)
---emb – embedding dimension
---layers – number of LAERC blocks
---batch – batch size (sequences per step)
---accum – gradient accumulation steps (1 = no accumulation)
---epochs, --steps_per_epoch – training duration, set to 0 for using the full dataset per epoch
---lr – learning rate
+- --data_dir – points to the tokenized dataset with train.bin / val.bin
+- --seq – sequence length (context)
+- --emb – embedding dimension
+- --layers – number of LAERC blocks
+- --batch – batch size (sequences per step)
+- --accum – gradient accumulation steps (1 = no accumulation)
+- --epochs, --steps_per_epoch – training duration, set to 0 for using the full dataset per epoch
+- --lr – learning rate
 
 Checkpoints are saved to for example:
 
-checkpoints/laerc_v50257_seq128_d64_L4_R4_RMLP1_FF4/model_stepXXXX.pt
-and a loss_log.csv with step-wise loss is written inside the checkpoint directory.
+- checkpoints/laerc_v50257_seq128_d64_L4_R4_RMLP1_FF4/model_stepXXXX.pt
+- and a loss_log.csv with step-wise loss is written inside the checkpoint directory.
 
 ##  4.4. Generate Shakespeare-like text
 
@@ -198,10 +198,9 @@ python -m scripts.prepare_gpt2_tokens \
 
 Notes:
 
---max_docs limits how many documents to use (here: first 100,000).
-Remove it to use the full dataset (this may be large).
-
-Tokens are stored as uint16 IDs consistent with GPT-2’s tokenizer.
+- --max_docs limits how many documents to use (here: first 100,000).
+- Remove it to use the full dataset (this may be large).
+- Tokens are stored as uint16 IDs consistent with GPT-2’s tokenizer.
 
 Example output:
 ```text
@@ -230,8 +229,7 @@ python -m scripts.train_openwebtext \
 Loss starts around ~10–11 for random initialization on GPT-2 vocabulary and then decreases as training proceeds.
 
 Checkpoints are stored for example under:
-
-checkpoints/laerc_v50257_seq128_d64_L8_R4_RMLP1_FF4/model_stepXXXX.pt
+- checkpoints/laerc_v50257_seq128_d64_L8_R4_RMLP1_FF4/model_stepXXXX.pt
 
 ## 5.3. Generate OpenWebText-style text
 
@@ -250,47 +248,45 @@ You can experiment with different prompts and model sizes.
 
 Core arguments:
 
---dataset {custom, openwebtext}
---raw_dir data/raw (for custom)
---out_dir data/my_tokens
---val_fraction 0.01
---max_docs N (optional; for openwebtext)
+- --dataset {custom, openwebtext}
+- --raw_dir data/raw (for custom)
+- --out_dir data/my_tokens
+- --val_fraction 0.01
+- --max_docs N (optional; for openwebtext)
 
 ## 6.2. scripts/train_openwebtext.py
 
-Core arguments:
+Core arguments for Data / model:
+- --data_dir (path containing train.bin / val.bin)
+- --vocab (default: 50257; GPT-2 vocab size)
+- --seq (context length, e.g. 128 / 512)
+- --emb (embedding size)
+- --layers (number of LAERC blocks)
+- --resv_mult, --res_mlp_mult, --ffn_mult, --res_radius
+- --no_reservoir (disable reservoir path → pure FFN baseline)
 
-Data / model
+Optimization:
 
---data_dir (path containing train.bin / val.bin)
---vocab (default: 50257; GPT-2 vocab size)
---seq (context length, e.g. 128 / 512)
---emb (embedding size)
---layers (number of LAERC blocks)
---resv_mult, --res_mlp_mult, --ffn_mult, --res_radius
---no_reservoir (disable reservoir path → pure FFN baseline)
+- --batch
+- --accum (gradient accumulation factor)
+- --lr
+- --epochs
+- --steps_per_epoch (<=0 → auto-compute from data size)
+- --weight_decay
+- --grad_clip
+- --beta2
 
-Optimization
+Scheduler:
 
---batch
---accum (gradient accumulation factor)
---lr
---epochs
---steps_per_epoch (<=0 → auto-compute from data size)
---weight_decay
---grad_clip
---beta2
+- --no_sched (disable scheduler)
+- --warmup_frac, --hold_frac, --min_lr_ratio
 
-Scheduler
-
---no_sched (disable scheduler)
---warmup_frac, --hold_frac, --min_lr_ratio
-Logging / checkpoint
---tag (run name; otherwise auto-generated from hyperparams)
---ckpt_dir (override default checkpoint directory)
---log_interval_steps
---flush_every
---seed
+Logging / checkpoint:
+- --tag (run name; otherwise auto-generated from hyperparams)
+- --ckpt_dir (override default checkpoint directory)
+- --log_interval_steps
+- --flush_every
+- --seed
 
 Call python -m scripts.train_openwebtext --help for full details.
 
@@ -298,11 +294,11 @@ Call python -m scripts.train_openwebtext --help for full details.
 
 Core arguments:
 
---ckpt – path to a specific checkpoint .pt file
+- --ckpt – path to a specific checkpoint .pt file
 or
---ckpt_dir – directory with model_step*.pt files (latest step is auto-selected)
---prompt – initial text prompt
---max_tokens – number of tokens to generate
+- --ckpt_dir – directory with model_step*.pt files (latest step is auto-selected)
+- --prompt – initial text prompt
+- --max_tokens – number of tokens to generate
 
 You can extend this script to add --temperature, --top_k, --top_p for more interesting sampling strategies.
 
