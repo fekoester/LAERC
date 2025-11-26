@@ -1,0 +1,27 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Checkpoints & logs
+checkpoints/
+*.pt
+*.ckpt
+*.log
+*.csv
+
+# Data
+data/
+openwebtext_data/
+*.bin
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
