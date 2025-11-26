@@ -31,19 +31,39 @@ def iter_text_from_dir(raw_dir: str) -> Iterable[str]:
                 if txt.strip():
                     yield txt
 
-
 def iter_text_openwebtext(max_docs: Optional[int] = None) -> Iterable[str]:
-    """Yield text from the HuggingFace 'openwebtext' dataset."""
+    """
+    Yield text from an OpenWebText dataset via HuggingFace `datasets` in streaming mode.
+
+    Uses the Parquet-backed 'dylanebert/openwebtext' dataset and streams rows
+    instead of downloading the entire dataset. This way, `max_docs` controls
+    how much data is actually read/downloaded.
+    """
     from datasets import load_dataset
 
-    ds = load_dataset("openwebtext", split="train")
-    n = len(ds)
-    limit = n if max_docs is None else min(max_docs, n)
+    try:
+        # streaming=True: only read what we iterate over
+        ds = load_dataset("dylanebert/openwebtext", split="train", streaming=True)
+    except Exception as e:
+        raise RuntimeError(
+            "Could not stream 'dylanebert/openwebtext' from the Hugging Face Hub.\n"
+            "Make sure you have:\n"
+            "  - Internet access\n"
+            "  - A recent version of `datasets` installed\n"
+            "Alternatively, use `--dataset custom` with your own local .txt files.\n\n"
+            f"Original error:\n{e}"
+        )
 
-    for i in range(limit):
-        txt = ds[i].get("text", "")
+    count = 0
+    for row in ds:
+        txt = row.get("text", "")
         if isinstance(txt, str) and txt.strip():
             yield txt
+            count += 1
+
+        if max_docs is not None and count >= max_docs:
+            break
+
 
 
 def encode_stream_to_ids(
@@ -142,6 +162,9 @@ def main():
 
     print(f"Wrote {n_train} train tokens to {train_path}")
     print(f"Wrote {n_val}  val tokens to {val_path}")
+    
+    # Hard exit to avoid PyGILState_Release crash caused by HF/pyarrow streaming teardown.
+    os._exit(0)
 
 
 if __name__ == "__main__":
