@@ -1,25 +1,47 @@
-# LAERC-LM: Layered Attention-Enhanced Reservoir Language Model
+# LAERC – Layered Attention-Enhanced Reservoir Language Model
 
-This repo contains a modular implementation of a **layered reservoir + FFN language model (LAERC)** in PyTorch.
+LAERC is a small, modular PyTorch implementation of a **layered reservoir + feed-forward** language model, trained on GPT-2 tokenized text.
 
-- `laerc/`: core library (config, model, data, training utilities)
-- `scripts/train_openwebtext.py`: train LAERC on a memmapped token dataset
-- `scripts/prepare_openwebtext.py`: turn raw `.txt` into `train.bin` / `val.bin` using GPT-2 BPE (`tiktoken`)
-- `scripts/sample.py`: generate text from a trained checkpoint
+The code is structured as a minimal research playground:
 
-## Quickstart
+- A `laerc` Python package with:
+  - **Config** (`TrainConfig`)
+  - **Reservoir + FFN model** (`ReservoirFFNLanguageModel`)
+  - **Training loop** with cosine schedule
+  - **Data helpers** for memmapped token datasets
+- Simple **scripts** to:
+  - Prepare datasets with **GPT-2 tokenizer** (`scripts/prepare_gpt2_tokens.py`)
+  - Train LAERC on any text dataset (`scripts/train_openwebtext.py`)
+  - Sample text from trained checkpoints (`scripts/sample.py`)
 
-```bash
-pip install -r requirements.txt
+You can start with a tiny **Shakespeare** dataset and then move to an **OpenWebText** subset for a more realistic experiment.
 
-# prepare data (put .txt in data/raw/)
-python scripts/prepare_openwebtext.py
+---
 
-# train
-python scripts/train_openwebtext.py --compile
+## 1. Repository structure
 
-# sample
-python scripts/sample.py --ckpt_dir checkpoints/<auto-tag> --prompt "Once upon a time"
+```text
+LAERC/
+  laerc/
+    __init__.py
+    config.py
+    data.py
+    model.py
+    train.py
+    utils.py
+
+  scripts/
+    prepare_gpt2_tokens.py   # generic GPT-2 tokenizer data prep
+    train_openwebtext.py     # generic LM training script
+    sample.py                # text generation from checkpoints
+
+  requirements.txt
+  .gitignore
+  README.md
+
+  data/          # created locally, ignored by git (raw + tokenized data)
+  checkpoints/   # created locally, ignored by git (model checkpoints)
+  .venv/         # local virtual environment (ignored)
 ```
 
 2. Installation
