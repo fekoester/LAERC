@@ -20,15 +20,17 @@ def build_argparser():
     ap.add_argument("--prompt", type=str, default="")
     return ap
 
-
 def load_latest_checkpoint_in_dir(ckpt_dir: str) -> str:
-    files = [f for f in os.listdir(ckpt_dir) if f.startswith("model_") and f.endswith(".pt")]
+    files = [f for f in os.listdir(ckpt_dir)
+             if f.startswith("model_step") and f.endswith(".pt")]
     if not files:
-        raise FileNotFoundError(f"No model_*.pt files found in {ckpt_dir}")
+        raise FileNotFoundError(f"No model_step*.pt files found in {ckpt_dir}")
     steps = []
     for f in files:
         try:
-            step = int(f.split("_")[1].split(".")[0])
+            # f is like "model_step400.pt"
+            step_str = f[len("model_step") :].split(".")[0]
+            step = int(step_str)
         except Exception:
             step = -1
         steps.append((step, f))

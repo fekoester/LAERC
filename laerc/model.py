@@ -144,7 +144,9 @@ class ReservoirBlock(nn.Module):
         h = self.ln_in(x)
 
         if self.rnn is not None:
-            r, _ = self.rnn(h)
+            # cuDNN RNN sometimes chokes on non-contiguous inputs, especially under torch.compile
+            h_contig = h.contiguous()
+            r, _ = self.rnn(h_contig)
             r = self.res_mlp(r)
             scale = torch.exp(self.res_log_scale)
             r = scale * r

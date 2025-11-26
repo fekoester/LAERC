@@ -24,12 +24,12 @@ class TrainConfig:
     accum: int = 8
     lr: float = 4e-4
     epochs: int = 1
-    total_updates: int = 200_000
+    steps_per_epoch: int = 0  # if <= 0 → auto-compute from data size
     weight_decay: float = 0.1
     grad_clip: float = 1.0
     beta2: float = 0.999
 
-    # scheduler
+    # scheduler (interpreted over total_steps = epochs * steps_per_epoch)
     sched: bool = True
     warmup_frac: float = 0.01
     hold_frac: float = 0.1
@@ -37,12 +37,12 @@ class TrainConfig:
 
     # hardware
     compile: bool = False
-    grad_accum_fp32: bool = True
+    grad_accum_fp32: bool = True  # kept for compatibility but unused with fp32-only
 
     # logging / ckpt
     tag: Optional[str] = None
     ckpt_dir: Optional[str] = None
-    log_interval_tokens: int = 1_000_000
+    log_interval_steps: int = 100  # log every N optimizer steps
     flush_every: int = 100
     seed: int = 42
 

@@ -28,7 +28,8 @@ def build_argparser():
     ap.add_argument("--accum", type=int, default=8)
     ap.add_argument("--lr", type=float, default=4e-4)
     ap.add_argument("--epochs", type=int, default=1)
-    ap.add_argument("--total_updates", type=int, default=200_000)
+    ap.add_argument("--steps_per_epoch", type=int, default=1000,
+                    help="Number of optimizer steps per epoch (<=0 → auto-compute from data size)")
     ap.add_argument("--weight_decay", type=float, default=0.1)
     ap.add_argument("--grad_clip", type=float, default=1.0)
     ap.add_argument("--beta2", type=float, default=0.999)
@@ -41,12 +42,12 @@ def build_argparser():
 
     # hardware
     ap.add_argument("--compile", action="store_true")
-    ap.add_argument("--no_grad_accum_fp32", action="store_true")
+    ap.add_argument("--no_grad_accum_fp32", action="store_true")  # kept for config compatibility
 
     # logging / ckpt
     ap.add_argument("--tag", type=str, default=None, help="Optional manual run tag (otherwise auto-generated)")
     ap.add_argument("--ckpt_dir", type=str, default=None)
-    ap.add_argument("--log_interval_tokens", type=int, default=1_000_000)
+    ap.add_argument("--log_interval_steps", type=int, default=100)
     ap.add_argument("--flush_every", type=int, default=100)
     ap.add_argument("--seed", type=int, default=42)
 
@@ -72,7 +73,7 @@ def main():
         accum=args.accum,
         lr=args.lr,
         epochs=args.epochs,
-        total_updates=args.total_updates,
+        steps_per_epoch=args.steps_per_epoch,
         weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
         beta2=args.beta2,
@@ -84,7 +85,7 @@ def main():
         grad_accum_fp32=not args.no_grad_accum_fp32,
         tag=args.tag,
         ckpt_dir=args.ckpt_dir,
-        log_interval_tokens=args.log_interval_tokens,
+        log_interval_steps=args.log_interval_steps,
         flush_every=args.flush_every,
         seed=args.seed,
     )

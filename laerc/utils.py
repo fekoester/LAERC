@@ -1,7 +1,7 @@
+from contextlib import nullcontext
 import csv
 import os
 import random
-from contextlib import nullcontext
 from typing import Iterable, List
 
 import numpy as np
@@ -23,14 +23,13 @@ def get_device() -> torch.device:
 
 
 def get_amp_dtype_and_ctx(device: torch.device):
-    if device.type == "cuda":
-        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        amp_ctx = torch.amp.autocast(device_type="cuda", dtype=amp_dtype)
-        use_scaler = (amp_dtype == torch.float16)
-    else:
-        amp_dtype = torch.float32
-        amp_ctx = nullcontext()
-        use_scaler = False
+    """
+    For now we run everything in full float32 for maximum stability
+    across GPUs / cuDNN versions. No autocast, no GradScaler.
+    """
+    amp_dtype = torch.float32
+    amp_ctx = nullcontext()
+    use_scaler = False
     return amp_dtype, amp_ctx, use_scaler
 
 
@@ -53,7 +52,7 @@ class CSVLogger:
         with open(self.path, "a", newline="") as f:
             writer = csv.writer(f)
             if (not file_exists) and (not self._initialized):
-                writer.writerow(["global_batch", "epoch", "step_in_epoch", "loss", "lr", "timestamp"])
+                writer.writerow(["global_step", "epoch", "step_in_epoch", "loss", "lr", "timestamp"])
                 self._initialized = True
             writer.writerows(self.buffer)
         self.buffer.clear()
@@ -67,7 +66,7 @@ def save_checkpoint(
     scheduler,
     cfg: TrainConfig,
 ):
-    ckpt_file = os.path.join(ckpt_dir, f"model_{step}.pt")
+    ckpt_file = os.path.join(ckpt_dir, f"model_step{step}.pt")
     torch.save(
         {
             "step": step,

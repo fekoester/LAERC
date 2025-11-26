@@ -1,27 +1,29 @@
-# Python cache
+# Python bytecode
 __pycache__/
-*.py[cod]
+*.pyc
 *.pyo
 *.pyd
 
-# Virtualenvs
+# Virtual environments
 .venv/
 venv/
+ENV/
 env/
 
-# Checkpoints & logs
-checkpoints/
-*.pt
-*.ckpt
-*.log
-*.csv
+# Build / packaging
+*.egg-info/
+dist/
+build/
 
-# Data
+# Data & checkpoints (generated locally)
 data/
-openwebtext_data/
-*.bin
+checkpoints/
 
-# OS/editor
-.DS_Store
-.idea/
+# Logs
+*.log
+
+# Editor / OS junk
 .vscode/
+.idea/
+.DS_Store
+Thumbs.db
