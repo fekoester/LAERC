@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
+import sys
 
-from laerc import TrainConfig, finalize_config
-from laerc.train import train
-from laerc.utils import set_seed
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from laerc import TrainConfig, finalize_config  # noqa: E402
+from laerc.data import load_meta  # noqa: E402
+from laerc.train import train  # noqa: E402
+from laerc.utils import set_seed  # noqa: E402
 
 
 def build_argparser():
@@ -21,6 +26,8 @@ def build_argparser():
     ap.add_argument("--res_mlp_mult", type=float, default=1.0)
     ap.add_argument("--ffn_mult", type=float, default=4.0)
     ap.add_argument("--res_radius", type=float, default=0.9)
+    ap.add_argument("--res_scale", type=str, default="radius", choices=["radius", "norm"],
+                    help="scale the reservoir's spectral radius (default) or, as in v0.1, its spectral norm")
     ap.add_argument("--no_reservoir", action="store_true", help="Disable reservoir path (pure FFN model)")
 
     # optimization
@@ -42,6 +49,12 @@ def build_argparser():
 
     # hardware
     ap.add_argument("--compile", action="store_true")
+    ap.add_argument("--amp", action="store_true", help="bf16 autocast on CUDA")
+
+    # evaluation / resume
+    ap.add_argument("--eval_interval_steps", type=int, default=500, help="validation every N steps (0: per epoch)")
+    ap.add_argument("--eval_batches", type=int, default=50)
+    ap.add_argument("--resume", type=str, default=None, help="checkpoint to resume from")
     ap.add_argument("--no_grad_accum_fp32", action="store_true")  # kept for config compatibility
 
     # logging / ckpt
@@ -68,6 +81,7 @@ def main():
         res_mlp_mult=args.res_mlp_mult,
         ffn_mult=args.ffn_mult,
         res_radius=args.res_radius,
+        res_scale=args.res_scale,
         use_reservoir=not args.no_reservoir,
         batch=args.batch,
         accum=args.accum,
@@ -82,6 +96,10 @@ def main():
         hold_frac=args.hold_frac,
         min_lr_ratio=args.min_lr_ratio,
         compile=args.compile,
+        amp=args.amp,
+        eval_interval_steps=args.eval_interval_steps,
+        eval_batches=args.eval_batches,
+        resume=args.resume,
         grad_accum_fp32=not args.no_grad_accum_fp32,
         tag=args.tag,
         ckpt_dir=args.ckpt_dir,
@@ -90,11 +108,15 @@ def main():
         seed=args.seed,
     )
 
+    meta = load_meta(cfg.data_dir)
+    if meta.get("vocab_size"):
+        cfg.vocab = int(meta["vocab_size"])  # compact vocabularies set their own size
     cfg = finalize_config(cfg)
     set_seed(cfg.seed)
 
     print(json.dumps(cfg.as_dict(), indent=2))
-    train(cfg)
+    out = train(cfg)
+    print(f"best validation loss {out['best_val_loss']:.4f} (perplexity {out['best_val_ppl']:.2f})")
 
 
 if __name__ == "__main__":

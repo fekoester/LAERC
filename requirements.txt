@@ -1,5 +1,6 @@
-transformers>=4.40.0
-datasets>=2.0.0
+torch
 numpy
 tqdm
-torch
+tiktoken
+datasets>=2.0.0  # only for --dataset openwebtext
+matplotlib  # only for benchmarks

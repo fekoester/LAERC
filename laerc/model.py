@@ -1,5 +1,4 @@
 import math
-from typing import Optional, List
 
 import torch
 import torch.nn as nn
@@ -23,7 +22,7 @@ class WarmHoldCosineLR(torch.optim.lr_scheduler._LRScheduler):
         self.min_r = float(min_lr_ratio)
         super().__init__(optimizer, last_epoch)
 
-    def get_lr(self) -> List[float]:
+    def get_lr(self) -> list[float]:
         step = self.last_epoch + 1
         base_lrs = self.base_lrs
 
@@ -56,6 +55,12 @@ def spectral_norm_power_dense(W: torch.Tensor, iters: int = 30) -> float:
     return sigma
 
 
+@torch.no_grad()
+def spectral_radius(W: torch.Tensor) -> float:
+    """Largest |eigenvalue| (computed once at init, in float64 on CPU)."""
+    return torch.linalg.eigvals(W.detach().double().cpu()).abs().max().item()
+
+
 class ReservoirBlock(nn.Module):
     """Single LAERC block: reservoir + gate + FFN."""
     def __init__(
@@ -66,8 +71,9 @@ class ReservoirBlock(nn.Module):
         ff_mult: float = 4.0,
         reservoir_radius: float = 0.9,
         use_reservoir: bool = True,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
+        res_scale: str = "radius",
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.D = D
@@ -95,7 +101,15 @@ class ReservoirBlock(nn.Module):
             with torch.no_grad():
                 W = torch.randn(self.R, self.R, device=device, dtype=param_dtype) / math.sqrt(self.R)
                 U = torch.randn(self.D, self.R, device=device, dtype=param_dtype) / math.sqrt(self.D)
-                sigma = spectral_norm_power_dense(W, iters=30)
+                # "radius": scale the spectral radius (largest |eigenvalue|), which sets the memory
+                # timescale ~ 1/ln(1/rho). "norm" reproduces v0.1, which scaled the spectral norm instead
+                # (for a random Gaussian matrix the radius is then only about half the requested value).
+                if res_scale == "radius":
+                    sigma = spectral_radius(W)
+                elif res_scale == "norm":
+                    sigma = spectral_norm_power_dense(W, iters=30)
+                else:
+                    raise ValueError("res_scale must be 'radius' or 'norm'")
                 if sigma > 0:
                     W.mul_(reservoir_radius / sigma)
                 rnn.weight_ih_l0.copy_(U.t().contiguous())
@@ -137,16 +151,20 @@ class ReservoirBlock(nn.Module):
         )
         self.ffn_alpha = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, h0: torch.Tensor | None = None):
         """
-        x: (B, T, D)
+        x: (B, T, D); h0: optional reservoir state (1, B, R) to continue from.
+        Returns (y, h_T) where h_T is the final reservoir state (None without a reservoir).
         """
         h = self.ln_in(x)
+        h_T = None
 
         if self.rnn is not None:
             # cuDNN RNN sometimes chokes on non-contiguous inputs, especially under torch.compile
             h_contig = h.contiguous()
-            r, _ = self.rnn(h_contig)
+            if h0 is not None:
+                h0 = h0.to(h_contig.dtype)
+            r, h_T = self.rnn(h_contig, h0)
             r = self.res_mlp(r)
             scale = torch.exp(self.res_log_scale)
             r = scale * r
@@ -159,7 +177,7 @@ class ReservoirBlock(nn.Module):
 
         ffn_out = self.ffn(self.ln_ffn(m))
         y = m + self.ffn_alpha * ffn_out
-        return y
+        return y, h_T
 
 
 class ReservoirFFNLanguageModel(nn.Module):
@@ -174,8 +192,9 @@ class ReservoirFFNLanguageModel(nn.Module):
         ff_mult: float = 4.0,
         reservoir_radius: float = 0.9,
         use_reservoir: bool = True,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
+        res_scale: str = "radius",
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.V = vocab_size
@@ -191,6 +210,7 @@ class ReservoirFFNLanguageModel(nn.Module):
                 ff_mult=ff_mult,
                 reservoir_radius=reservoir_radius,
                 use_reservoir=use_reservoir,
+                res_scale=res_scale,
                 device=device,
                 dtype=dtype,
             )
@@ -219,25 +239,46 @@ class ReservoirFFNLanguageModel(nn.Module):
     def forward(
         self,
         idx: torch.Tensor,
-        targets: Optional[torch.Tensor] = None,
+        targets: torch.Tensor | None = None,
+        state: list[torch.Tensor | None] | None = None,
+        return_state: bool = False,
     ):
         """
-        idx: (B, T) token ids
-        targets: (B, T) or None
+        idx: (B, T) token ids; targets: (B, T) or None.
+        state: per-block reservoir states from a previous call (continue the sequence from there).
+        Everything except the reservoir acts per token, so feeding a sequence in pieces while
+        carrying `state` gives exactly the same logits as feeding it at once (used for generation).
+        Returns (logits, loss) or, with return_state=True, (logits, loss, new_state).
         """
         x = self.embed(idx)
-        for blk in self.blocks:
-            x = blk(x)
+        new_state = []
+        for i, blk in enumerate(self.blocks):
+            x, h = blk(x, None if state is None else state[i])
+            new_state.append(h)
         x = self.norm_f(x)
         logits = self.out(x)
 
         loss = None
         if targets is not None:
             loss = F.cross_entropy(
-                logits.view(-1, self.V),
-                targets.view(-1),
+                logits.reshape(-1, self.V).float(),
+                targets.reshape(-1),
             )
+        if return_state:
+            return logits, loss, new_state
         return logits, loss
+
+
+def build_model(cfg, device=None, dtype=None) -> "ReservoirFFNLanguageModel":
+    """Construct the model described by a TrainConfig (or a dict with the same keys)."""
+    get = cfg.get if isinstance(cfg, dict) else (lambda k, d=None: getattr(cfg, k, d))
+    return ReservoirFFNLanguageModel(
+        vocab_size=get("vocab"), D=get("emb"), num_layers=get("layers"),
+        reservoir_mult=get("resv_mult", 4.0), reservoir_mlp_mult=get("res_mlp_mult", 1.0),
+        ff_mult=get("ffn_mult", 4.0), reservoir_radius=get("res_radius", 0.9),
+        use_reservoir=get("use_reservoir", True), res_scale=get("res_scale", "norm"),
+        device=device, dtype=dtype,
+    )
 
 
 def build_optimizer(
@@ -245,6 +286,7 @@ def build_optimizer(
     lr: float,
     weight_decay: float = 0.1,
     emb_lr_mult: float = 0.2,
+    beta2: float = 0.999,
 ):
     """AdamW with different decay for embeddings / norms / biases."""
     decay, nodecay, seen = [], [], set()
@@ -276,8 +318,8 @@ def build_optimizer(
         groups.append({"params": [emb_param], "lr": lr * emb_lr_mult, "weight_decay": 0.0})
 
     try:
-        opt = torch.optim.AdamW(groups, betas=(0.9, 0.999), weight_decay=0.0, fused=True)
+        opt = torch.optim.AdamW(groups, betas=(0.9, beta2), weight_decay=0.0, fused=True)
     except TypeError:
-        opt = torch.optim.AdamW(groups, betas=(0.9, 0.999), weight_decay=0.0)
+        opt = torch.optim.AdamW(groups, betas=(0.9, beta2), weight_decay=0.0)
     return opt
 
