@@ -52,3 +52,24 @@ def eval_windows(tokens: np.memmap, seq: int, batch_size: int, n_batches: int):
     for i in range(0, len(starts), batch_size):
         chunk = np.stack([np.asarray(tokens[s: s + seq]) for s in starts[i: i + batch_size]]).astype(np.int64)
         yield torch.from_numpy(chunk[:, :-1]), torch.from_numpy(chunk[:, 1:])
+
+
+def chars_per_token(data_dir: str) -> float | None:
+    """Average characters per validation token, to turn nats/token into bits/char.
+
+    BPE datasets store val_chars in meta.json; for GPT-2 datasets the validation tokens are decoded.
+    """
+    meta = load_meta(data_dir)
+    if meta.get("val_chars") and meta.get("n_val"):
+        return meta["val_chars"] / meta["n_val"]
+    try:
+        import tiktoken
+    except ImportError:
+        return None
+    val = np.fromfile(os.path.join(data_dir, "val.bin"), dtype=np.uint16).astype(np.int64)
+    id_map = meta.get("id_map")
+    if id_map is not None:
+        val = np.asarray(id_map)[val]
+    enc = tiktoken.get_encoding("gpt2")
+    text = enc.decode([int(i) for i in val if i != enc.eot_token])
+    return len(text) / len(val)

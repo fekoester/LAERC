@@ -28,9 +28,53 @@ $$
 
 Only $U$ and $W$ are random and frozen. $W$ is scaled to **spectral radius** ρ, which sets how long the reservoir remembers: a perturbation decays like $\rho^t$, so the memory timescale is about $1/\ln(1/\rho)$ tokens. That is roughly 10 tokens at ρ = 0.9 and 100 at ρ = 0.99. Embedding and output weights are tied.
 
+### Multi-timescale reservoir (`--res_leak_min`)
+
+With a single ρ every reservoir unit forgets at about the same rate, so the whole state is spent on one timescale. The leaky variant gives each unit $i$ its own leak rate $a_i$, log-spaced from `res_leak_min` to 1:
+
+$$
+h_t = (1-a)\odot h_{t-1} + a \odot \tanh\!\big(U\,\mathrm{LN}(x_t) + W h_{t-1}\big), \qquad a_i \in [a_{\min},\,1]\ \text{log-spaced}
+$$
+
+Units with $a\approx 1$ behave like the plain reservoir and keep the last few tokens precisely; units with $a \ll 1$ are near-linear running averages with timescale $\tau\approx 1/a$ that summarise the wider context. Every decade of $\tau$ gets the same number of units. $U$ and $W$ stay frozen and random, and the number of trainable parameters does not change. The recurrence then runs as a Python loop instead of the fused `nn.RNN` kernel, which makes training about 1.8× slower on CPU.
+
 Since everything except the reservoir acts on one token at a time, the model can generate **incrementally**. `sample.py` carries each block's reservoir state forward, so every new token costs one step instead of a pass over the whole sequence (15× faster for 500 tokens on CPU). Feeding a sequence in pieces gives exactly the same logits as feeding it at once, and a test checks this.
 
-## Results: Shakespeare
+## Results: Shakespeare, ~200k parameters, 1,024-token BPE
+
+Setup:
+- complete works, byte-level BPE with 1,024 tokens trained on the training split (2.4 characters per token)
+- D = 48, L = 4, sequence length 128, batch 16, so about 200k trainable parameters *including* the embedding
+- 10,000 steps at lr 3e-3, one seed, CPU
+- validation on fixed windows of the held-out last 1%; **bits per character** (bpc) is comparable across tokenizers
+
+Reproduce with:
+
+```bash
+python scripts/prepare_bpe_tokens.py --raw_dir data/raw --out_dir data/shakespeare_bpe1024 --vocab_size 1024
+python benchmarks/run_benchmark.py --data_dir data/shakespeare_bpe1024 --emb 48 --steps 10000 --eval_interval 500 \
+    --out results/shakespeare_bpe1024
+```
+
+| model | trainable params (all) | non-embedding | best val loss | val perplexity | bits/char |
+|---|---|---|---|---|---|
+| FFN only (no context) | 153,508 | 104,356 | 4.172 | 64.9 | 2.496 |
+| LAERC v0.1 scaling (ρ≈0.47) | 201,512 | 152,360 | 3.628 | 37.6 | 2.171 |
+| LAERC, ρ = 0.9 | 201,512 | 152,360 | 3.582 | 35.9 | 2.143 |
+| LAERC, ρ = 0.99 | 201,512 | 152,360 | 3.583 | 36.0 | 2.144 |
+| **LAERC, multi-timescale** (ρ = 0.9, leak 10⁻³…1) | 201,512 | 152,360 | **3.491** | **32.8** | **2.089** |
+| GPT, same width and depth | 168,480 | 119,328 | 3.568 | 35.5 | 2.135 |
+
+![Validation curves, BPE 1024](results/shakespeare_bpe1024/val_curves.png)
+
+- **The multi-timescale reservoir is the best model here:** 2.089 bpc against 2.135 for the GPT and 2.143 for the single-ρ reservoir. It adds 15% to the context gain over the FFN-only model (0.407 vs. 0.353 bpc) and is ahead of every other model at every evaluation from step 1,000 on.
+- **Longer memory alone does nothing:** ρ = 0.9 and ρ = 0.99 are identical, and even ρ ≈ 0.47 (about one token of memory) gets most of the way. A plausible reason is capacity: a reservoir with $R$ units holds at most about $R$ dimensions of linearly recoverable history (Jaeger's memory-capacity bound), which with a $D$-dimensional input is only $R/D = 4$ tokens. Raising ρ shifts that budget to older tokens at the expense of recent ones; spreading the leak rates instead divides it over $\log\tau$.
+- **The single-ρ LAERC and the GPT are tied** (2.143 vs. 2.135 bpc), and the GPT has 17% fewer parameters.
+- **This 200k model beats the 1.56M-parameter one below:** about 2.09–2.14 bpc here against about 2.16 bpc (5.142 nats/token at 3.44 characters per token) for the 20k-vocabulary run, though that run had only 1,200 steps.
+
+Caveats: one seed, the LAERC models have about 20% more trainable parameters than the GPT, and with a 128-token window the slowest units ($\tau \approx 1000$) never reach a steady state. The next checks are more seeds, a parameter-matched GPT and longer sequences.
+
+## Results: Shakespeare, GPT-2 vocabulary (v0.2)
 
 Setup:
 - complete works (2.7M GPT-2 tokens), compact vocabulary of 20,204 tokens
@@ -40,7 +84,7 @@ Setup:
 
 Reproduce with `python benchmarks/run_benchmark.py --data_dir data/shakespeare_compact`.
 
-| model | trainable non-embedding params | best val loss | val perplexity |
+| model | trainable non-embedding params (the tied 20,204 × 64 embedding adds 1.29M) | best val loss | val perplexity |
 |---|---|---|---|
 | FFN only, `--no_reservoir` (no information flows between tokens) | 184k | 5.384 | 217.9 |
 | LAERC, v0.1 reservoir scaling (actual ρ ≈ 0.47) | 269k | 5.191 | 179.7 |
@@ -101,6 +145,14 @@ python scripts/sample.py --ckpt_dir checkpoints/laerc_v20204_seq128_d64_L4_R4_RM
     --prompt "ROMEO:" --max_tokens 200 --top_p 0.9 --temperature 0.9
 ```
 
+For a much smaller model, train a 1,024-token BPE on the text instead of using GPT-2 tokens. The tokenizer is stored in `meta.json` and inside every checkpoint, so `sample.py` decodes it without extra files:
+
+```bash
+python scripts/prepare_bpe_tokens.py --raw_dir data/raw --out_dir data/shakespeare_bpe1024 --vocab_size 1024
+python scripts/train_openwebtext.py --data_dir data/shakespeare_bpe1024 \
+    --seq 128 --emb 48 --layers 4 --batch 16 --epochs 10 --steps_per_epoch 1000 --lr 3e-3 --res_leak_min 1e-3
+```
+
 The vocabulary size is read from the dataset's `meta.json`, so `--vocab` doesn't need to be set. The id map travels inside each checkpoint, and `sample.py` uses it to decode compact ids.
 
 A run directory contains:
@@ -132,13 +184,20 @@ Tokens are streamed to disk, so 100k documents (about 113M tokens) need little R
 | group | flags |
 |---|---|
 | data | `--data_dir`, `--seq`, `--vocab` (taken from `meta.json` when present) |
-| model | `--emb`, `--layers`, `--resv_mult` (R = mult·D), `--res_mlp_mult`, `--ffn_mult`, `--res_radius`, `--res_scale {radius,norm}`, `--no_reservoir` |
+| model | `--emb`, `--layers`, `--resv_mult` (R = mult·D), `--res_mlp_mult`, `--ffn_mult`, `--res_radius`, `--res_scale {radius,norm}`, `--res_leak_min` (< 1: multi-timescale), `--no_reservoir` |
 | optimization | `--batch`, `--accum`, `--lr`, `--weight_decay`, `--grad_clip`, `--beta2`, `--epochs`, `--steps_per_epoch` |
 | schedule | `--no_sched`, `--warmup_frac`, `--hold_frac`, `--min_lr_ratio` |
 | evaluation | `--eval_interval_steps`, `--eval_batches`, `--resume` |
 | hardware | `--amp` (bf16 on CUDA), `--compile` |
 
 Sampling options are `--temperature`, `--top_k`, `--top_p`, `--seed` and `--num_samples`.
+
+## Changes in 0.3
+
+- **New: multi-timescale reservoir.** `--res_leak_min` gives each reservoir unit its own leak rate, log-spaced up to 1. U and W stay frozen. It is the best model in the 200k-parameter benchmark above. Feeding a sequence in pieces still gives exactly the same logits, and a test checks this.
+- **New: `scripts/prepare_bpe_tokens.py`** trains a small byte-level BPE (e.g. 1,024 tokens) on the training text. The tokenizer travels in `meta.json` and in the checkpoints. The output layer and embedding shrink by 20×.
+- **New in the benchmark:** bits per character (comparable across tokenizers), total trainable parameters, a `laerc_multi` run and a plot title that names the tokenizer.
+- `tokenizers` is now a dependency, and benchmark checkpoints (`results/*/ckpt/`) are git-ignored.
 
 ## Changes in 0.2
 

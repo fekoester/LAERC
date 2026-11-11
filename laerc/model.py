@@ -72,11 +72,13 @@ class ReservoirBlock(nn.Module):
         reservoir_radius: float = 0.9,
         use_reservoir: bool = True,
         res_scale: str = "radius",
+        res_leak_min: float = 1.0,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.D = D
+        self.leaky = use_reservoir and res_leak_min < 1.0
         self.R = int(D * reservoir_mult)
         self.H_res = int(D * reservoir_mlp_mult)
         self.H_ff = int(D * ff_mult)
@@ -121,6 +123,12 @@ class ReservoirBlock(nn.Module):
                 p.requires_grad = False
 
             self.rnn = rnn
+            if self.leaky:
+                # multi-timescale (leaky) reservoir: unit i integrates with its own leak rate a_i,
+                #   h_t = (1 - a) * h_{t-1} + a * tanh(U x_t + W h_{t-1}),
+                # a log-spaced in [res_leak_min, 1] -> memory timescales from ~1 to ~1/res_leak_min tokens.
+                leak = torch.logspace(math.log10(res_leak_min), 0.0, self.R, device=device, dtype=param_dtype)
+                self.register_buffer("leak", leak)
             self.res_mlp = nn.Sequential(
                 nn.LayerNorm(self.R),
                 nn.Linear(self.R, self.H_res),
@@ -164,7 +172,10 @@ class ReservoirBlock(nn.Module):
             h_contig = h.contiguous()
             if h0 is not None:
                 h0 = h0.to(h_contig.dtype)
-            r, h_T = self.rnn(h_contig, h0)
+            if self.leaky:
+                r, h_T = self._leaky_scan(h_contig, h0)
+            else:
+                r, h_T = self.rnn(h_contig, h0)
             r = self.res_mlp(r)
             scale = torch.exp(self.res_log_scale)
             r = scale * r
@@ -180,6 +191,20 @@ class ReservoirBlock(nn.Module):
         return y, h_T
 
 
+    def _leaky_scan(self, x: torch.Tensor, h0: torch.Tensor | None):
+        """Leaky tanh reservoir over (B, T, D) with the frozen U, W of self.rnn. Returns (B,T,R), (1,B,R)."""
+        rnn = self.rnn
+        pre = F.linear(x, rnn.weight_ih_l0, rnn.bias_ih_l0 + rnn.bias_hh_l0)  # (B, T, R), one matmul
+        B, T, _ = pre.shape
+        h = pre.new_zeros(B, self.R) if h0 is None else h0[0]
+        a, W = self.leak, rnn.weight_hh_l0
+        outs = []
+        for t in range(T):
+            h = h + a * (torch.tanh(pre[:, t] + h @ W.t()) - h)
+            outs.append(h)
+        return torch.stack(outs, dim=1), h.unsqueeze(0)
+
+
 class ReservoirFFNLanguageModel(nn.Module):
     """Top-level LAERC LM: embedding + stacked ReservoirBlocks + output."""
     def __init__(
@@ -193,6 +218,7 @@ class ReservoirFFNLanguageModel(nn.Module):
         reservoir_radius: float = 0.9,
         use_reservoir: bool = True,
         res_scale: str = "radius",
+        res_leak_min: float = 1.0,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
@@ -211,6 +237,7 @@ class ReservoirFFNLanguageModel(nn.Module):
                 reservoir_radius=reservoir_radius,
                 use_reservoir=use_reservoir,
                 res_scale=res_scale,
+                res_leak_min=res_leak_min,
                 device=device,
                 dtype=dtype,
             )
@@ -277,7 +304,7 @@ def build_model(cfg, device=None, dtype=None) -> "ReservoirFFNLanguageModel":
         reservoir_mult=get("resv_mult", 4.0), reservoir_mlp_mult=get("res_mlp_mult", 1.0),
         ff_mult=get("ffn_mult", 4.0), reservoir_radius=get("res_radius", 0.9),
         use_reservoir=get("use_reservoir", True), res_scale=get("res_scale", "norm"),
-        device=device, dtype=dtype,
+        res_leak_min=get("res_leak_min", 1.0) or 1.0, device=device, dtype=dtype,
     )
 
 

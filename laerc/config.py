@@ -18,6 +18,7 @@ class TrainConfig:
     res_radius: float = 0.9
     res_scale: str = "radius"  # "radius" (true spectral radius) | "norm" (v0.1 behaviour)
     use_reservoir: bool = True
+    res_leak_min: float = 1.0  # < 1: leaky multi-timescale reservoir, leak rates log-spaced in [res_leak_min, 1]
 
     # optimization
     batch: int = 8

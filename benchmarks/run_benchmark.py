@@ -13,6 +13,7 @@ Shakespeare benchmark: validation perplexity at an equal step budget.
 import argparse
 import csv
 import json
+import math
 import os
 import sys
 
@@ -21,7 +22,7 @@ sys.path.insert(0, ROOT)
 
 from benchmarks.gpt_baseline import GPT  # noqa: E402
 from laerc import TrainConfig, finalize_config  # noqa: E402
-from laerc.data import load_meta  # noqa: E402
+from laerc.data import chars_per_token, load_meta  # noqa: E402
 from laerc.train import train  # noqa: E402
 from laerc.utils import set_seed  # noqa: E402
 
@@ -30,6 +31,7 @@ RUNS = {
     "laerc_v01": dict(res_scale="norm", res_radius=0.9),
     "laerc_r0.9": dict(res_scale="radius", res_radius=0.9),
     "laerc_r0.99": dict(res_scale="radius", res_radius=0.99),
+    "laerc_multi": dict(res_scale="radius", res_radius=0.9, res_leak_min=1e-3),
     "gpt": dict(),
 }
 LABELS = {
@@ -37,6 +39,7 @@ LABELS = {
     "laerc_v01": "LAERC v0.1 scaling (ρ≈0.47)",
     "laerc_r0.9": "LAERC, ρ = 0.9",
     "laerc_r0.99": "LAERC, ρ = 0.99",
+    "laerc_multi": "LAERC, multi-timescale (ρ = 0.9, leak 1e-3…1)",
     "gpt": "GPT (small Transformer)",
 }
 
@@ -55,11 +58,14 @@ def main():
     ap.add_argument("--eval_batches", type=int, default=25)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", default="results/shakespeare")
+    ap.add_argument("--title", default="Shakespeare", help="dataset name for the plot title")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     res_path = os.path.join(a.out, "results.json")
     results = json.load(open(res_path)) if os.path.exists(res_path) else {}
-    vocab = load_meta(a.data_dir).get("vocab_size", 50257)
+    meta = load_meta(a.data_dir)
+    vocab = meta.get("vocab_size", 50257)
+    cpt = chars_per_token(a.data_dir)  # to convert nats/token -> bits/char, comparable across tokenizers
 
     for name in a.runs:
         if name in results:
@@ -76,6 +82,7 @@ def main():
         print(f"\n=== {name} ===", flush=True)
         out = train(cfg, model=model)
         m = out.pop("model")
+        out["params_total"] = sum(p.numel() for p in m.parameters() if p.requires_grad)
         out["params_non_embedding"] = sum(p.numel() for n, p in m.named_parameters()
                                           if p.requires_grad and "embed" not in n)
         with open(os.path.join(cfg.ckpt_dir, "val_log.csv")) as f:
@@ -84,12 +91,15 @@ def main():
         with open(res_path, "w") as f:
             json.dump(results, f, indent=2)
 
-    lines = ["| model | non-embedding params | best val loss | val perplexity |", "|---|---|---|---|"]
+    lines = ["| model | trainable params (all) | non-embedding | best val loss | val perplexity | bits/char |",
+             "|---|---|---|---|---|---|"]
     for name in RUNS:
         if name in results:
             r = results[name]
-            lines.append(f"| {LABELS[name]} | {r['params_non_embedding']:,} | {r['best_val_loss']:.3f} | "
-                         f"{r['best_val_ppl']:.1f} |")
+            bpc = f"{r['best_val_loss'] / math.log(2) / cpt:.3f}" if cpt else "–"
+            total = f"{r['params_total']:,}" if "params_total" in r else "–"
+            lines.append(f"| {LABELS[name]} | {total} | {r['params_non_embedding']:,} | {r['best_val_loss']:.3f} | "
+                         f"{r['best_val_ppl']:.1f} | {bpc} |")
     md = "\n".join(lines)
     open(os.path.join(a.out, "results.md"), "w").write(md + "\n")
     print(md)
@@ -106,7 +116,8 @@ def main():
             ax.plot(s, v, marker="o", ms=3, label=LABELS[name])
     ax.set_xlabel("optimizer step")
     ax.set_ylabel("validation loss (nats/token)")
-    ax.set_title("Shakespeare, GPT-2 tokens (compact vocab)")
+    tok = f"byte-level BPE, V = {vocab:,}" if meta.get("tokenizer") == "bpe" else f"GPT-2 tokens, V = {vocab:,}"
+    ax.set_title(f"{a.title}, {tok}")
     ax.grid(alpha=0.3)
     ax.legend()
     fig.tight_layout()

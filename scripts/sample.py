@@ -87,33 +87,45 @@ def main():
             raise ValueError("Either --ckpt or --ckpt_dir must be provided.")
         args.ckpt = load_latest_checkpoint_in_dir(args.ckpt_dir)
 
-    import tiktoken
-
     device = get_device()
     ckpt = load_checkpoint(args.ckpt, map_location=device)
     model = build_model(ckpt["config"], device=device, dtype=torch.float32).to(device)
     model.load_state_dict(ckpt["model"])
 
-    enc = tiktoken.get_encoding("gpt2")
-    id_map = (ckpt.get("meta") or {}).get("id_map")
-    g2c = {g: c for c, g in enumerate(id_map)} if id_map is not None else None
+    meta = ckpt.get("meta") or {}
+    if meta.get("tokenizer") == "bpe":  # small BPE from prepare_bpe_tokens.py, stored in the checkpoint
+        from tokenizers import Tokenizer
 
-    def to_model(ids):  # GPT-2 ids -> model ids (tokens unseen in training are dropped)
-        return ids if g2c is None else [g2c[i] for i in ids if i in g2c]
+        tok = Tokenizer.from_str(meta["tokenizer_json"])
+        encode_text = lambda s: tok.encode(s).ids  # noqa: E731
+        decode_ids = lambda ids: tok.decode(ids, skip_special_tokens=False)  # noqa: E731
+        eot = meta["eot_id"]
+    else:
+        import tiktoken
 
-    def to_gpt2(ids):
-        return ids if id_map is None else [id_map[i] for i in ids]
+        enc = tiktoken.get_encoding("gpt2")
+        id_map = meta.get("id_map")
+        g2c = {g: c for c, g in enumerate(id_map)} if id_map is not None else None
 
-    prompt = to_model(enc.encode_ordinary(args.prompt)) if args.prompt else []
+        def encode_text(s):  # GPT-2 ids -> model ids (tokens unseen in training are dropped)
+            ids = enc.encode_ordinary(s)
+            return ids if g2c is None else [g2c[i] for i in ids if i in g2c]
+
+        def decode_ids(ids):
+            return enc.decode(ids if id_map is None else [id_map[i] for i in ids])
+
+        eot = g2c[enc.eot_token] if g2c is not None else enc.eot_token
+
+    prompt = encode_text(args.prompt) if args.prompt else []
     if not prompt:
-        prompt = to_model([enc.eot_token])
+        prompt = [eot]
     gen = torch.Generator(device=device).manual_seed(args.seed) if args.seed is not None else None
     for i in range(args.num_samples):
         ids = torch.tensor([prompt], dtype=torch.long, device=device)
         out = generate(model, ids, args.max_tokens, args.temperature, args.top_k, args.top_p, gen)
         if args.num_samples > 1:
             print(f"--- sample {i + 1} ---")
-        print(enc.decode(to_gpt2(out[0].tolist())))
+        print(decode_ids(out[0].tolist()))
 
 
 if __name__ == "__main__":

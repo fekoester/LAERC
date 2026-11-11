@@ -27,3 +27,6 @@ checkpoints/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Benchmark checkpoints
+results/*/ckpt/
