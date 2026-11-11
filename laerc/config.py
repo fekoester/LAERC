@@ -1,6 +1,5 @@
-from dataclasses import dataclass, asdict
-from typing import Optional
 import os
+from dataclasses import asdict, dataclass
 
 
 @dataclass
@@ -17,6 +16,7 @@ class TrainConfig:
     res_mlp_mult: float = 1.0
     ffn_mult: float = 4.0
     res_radius: float = 0.9
+    res_scale: str = "radius"  # "radius" (true spectral radius) | "norm" (v0.1 behaviour)
     use_reservoir: bool = True
 
     # optimization
@@ -37,11 +37,17 @@ class TrainConfig:
 
     # hardware
     compile: bool = False
-    grad_accum_fp32: bool = True  # kept for compatibility but unused with fp32-only
+    amp: bool = False  # bf16 autocast on CUDA (float32 otherwise)
+    grad_accum_fp32: bool = True  # kept for compatibility (unused)
+
+    # evaluation
+    eval_interval_steps: int = 500  # validation loss every N optimizer steps (0: only at epoch end)
+    eval_batches: int = 50          # number of validation windows of `batch` sequences
+    resume: str | None = None    # checkpoint to resume from (model, optimizer, scheduler, step)
 
     # logging / ckpt
-    tag: Optional[str] = None
-    ckpt_dir: Optional[str] = None
+    tag: str | None = None
+    ckpt_dir: str | None = None
     log_interval_steps: int = 100  # log every N optimizer steps
     flush_every: int = 100
     seed: int = 42
