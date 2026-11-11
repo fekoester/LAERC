@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "laerc"
-version = "0.2.0"
+version = "0.3.0"
 description = "LAERC: layered reservoir + feed-forward language model with content-dependent readout of frozen reservoirs"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{name = "Felix Köster"}]
-dependencies = ["torch>=2.1", "numpy", "tqdm", "tiktoken"]
+dependencies = ["torch>=2.1", "numpy", "tqdm", "tiktoken", "tokenizers>=0.15"]
 
 [project.optional-dependencies]
 openwebtext = ["datasets>=2.0.0"]

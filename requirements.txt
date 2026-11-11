@@ -2,5 +2,6 @@ torch
 numpy
 tqdm
 tiktoken
+tokenizers>=0.15  # small BPE (prepare_bpe_tokens.py)
 datasets>=2.0.0  # only for --dataset openwebtext
 matplotlib  # only for benchmarks

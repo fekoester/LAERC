@@ -84,3 +84,25 @@ def test_reservoir_is_frozen_and_tied():
     m = ReservoirFFNLanguageModel(100, 16, 2)
     assert not any(p.requires_grad for n, p in m.named_parameters() if ".rnn." in n)
     assert m.out.weight is m.embed.weight
+
+
+def test_leaky_scan_reduces_to_rnn_when_leak_is_one():
+    torch.manual_seed(0)
+    from laerc.model import ReservoirBlock
+
+    blk = ReservoirBlock(16, res_leak_min=0.5)
+    blk.leak.fill_(1.0)  # a = 1 -> plain tanh ESN
+    x = torch.randn(2, 9, 16)
+    r_leaky, h_leaky = blk._leaky_scan(x, None)
+    r_rnn, h_rnn = blk.rnn(x, None)
+    assert torch.allclose(r_leaky, r_rnn, atol=1e-5) and torch.allclose(h_leaky, h_rnn, atol=1e-5)
+
+
+def test_leaky_model_chunked_equals_full():
+    torch.manual_seed(0)
+    m = ReservoirFFNLanguageModel(100, 16, 2, res_leak_min=1e-3).eval()
+    idx = torch.randint(0, 100, (2, 12))
+    full, _ = m(idx)
+    a, _, st = m(idx[:, :5], return_state=True)
+    b, _, _ = m(idx[:, 5:], state=st, return_state=True)
+    assert torch.allclose(full, torch.cat([a, b], dim=1), atol=1e-5)
