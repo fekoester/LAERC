@@ -61,6 +61,8 @@ def main():
     ap.add_argument("--eval_interval", type=int, default=200)
     ap.add_argument("--eval_batches", type=int, default=25)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--accum", type=int, default=1, help="gradient accumulation (effective batch = batch * accum)")
+    ap.add_argument("--amp", action="store_true", help="mixed precision on CUDA (as in train_openwebtext.py)")
     ap.add_argument("--out", default="results/shakespeare")
     ap.add_argument("--title", default="Shakespeare", help="dataset name for the plot title")
     a = ap.parse_args()
@@ -75,8 +77,8 @@ def main():
         if name in results:
             continue
         cfg = TrainConfig(data_dir=a.data_dir, vocab=vocab, seq=a.seq, emb=a.emb, layers=a.layers, batch=a.batch,
-                          accum=1, lr=a.lr, epochs=1, steps_per_epoch=a.steps, eval_interval_steps=a.eval_interval,
-                          eval_batches=a.eval_batches, log_interval_steps=50, seed=a.seed,
+                          accum=a.accum, lr=a.lr, epochs=1, steps_per_epoch=a.steps, eval_interval_steps=a.eval_interval,
+                          eval_batches=a.eval_batches, log_interval_steps=50, seed=a.seed, amp=a.amp,
                           ckpt_dir=os.path.join(a.out, "ckpt", name), tag=name)
         for k, v in RUNS[name].items():
             setattr(cfg, k, v)
