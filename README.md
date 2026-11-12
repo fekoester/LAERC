@@ -73,7 +73,7 @@ $$
 \tilde h_t = \lambda \odot \tilde h_{t-1} + \gamma \odot B\,\mathrm{LN}(x_t), \qquad \text{features} = [\,\mathrm{Re}\,\tilde h_t,\ \mathrm{Im}\,\tilde h_t\,] \in \mathbb{R}^{R},
 $$
 
-with $R/2$ complex modes. Each mode $\lambda_i = e^{-1/\tau_i + i\theta_i}$ has its timescale set the same way as the leaky reservoir's: $\tau_i = \tau_\rho / a_i$, where $\tau_\rho = 1/\ln(1/\rho)$, and the $a_i$ are log-spaced in [`res_leak_min`, 1] and divided by $g^k$ under `--res_depth_growth`. The phases are uniform in $[0,\pi]$, and $\gamma_i = \sqrt{1-|\lambda_i|^2}$ gives every mode unit variance however slow it is. $B$, $\lambda$ and $\gamma$ are random and frozen, so the number of trainable parameters is the same as in the tanh model.
+with $R/2$ complex modes. Each mode $\lambda_i = e^{-1/\tau_i + i\theta_i}$ gets a timescale $\tau_i$, log-spaced from 1 token up to $\tau_\rho/a_{\min}$, where $\tau_\rho = 1/\ln(1/\rho)$ and $a_{\min}$ = `res_leak_min`. Under `--res_depth_growth`, block $k$'s whole band is multiplied by $g^k$. (Up to v0.5 the band started at $\tau_\rho$, about 9.5 tokens, so there were no fast modes; see the T4 results below.) The phases are uniform in $[0,\pi]$, and $\gamma_i = \sqrt{1-|\lambda_i|^2}$ gives every mode unit variance however slow it is. $B$, $\lambda$ and $\gamma$ are random and frozen, so the number of trainable parameters is the same as in the tanh model.
 
 Because the recurrence is diagonal and constant, the whole sequence is computed at once (`diag_scan`). Within chunks of 32 tokens it is one small Toeplitz matmul per mode, $\lambda^{\,i-j}$ for $i \ge j$, and a loop over $T/32$ carries chains the chunks. Only non-negative powers of $\lambda$ appear, so it is numerically stable. The work is $O(BTRC)$ with no $R\times R$ matmul at all, compared with $O(BTR^2)$ done sequentially for the tanh reservoir. Incremental generation still carries the state (now complex), and feeding a sequence in pieces gives exactly the same logits.
 
@@ -140,7 +140,7 @@ The same benchmark and seed, run on a free Kaggle T4 with the two new variants a
 
 - **The multi-timescale reservoir is again the best model.** Its margin over the GPT, 0.06 bpc, is slightly larger than on the CPU.
 - **Geometric depth is as good as the multi-timescale run, but not better.** With a 128-token window, the per-unit spread up to τ ≈ 1000 already covers all the context there is. Depth scheduling should only matter once the sequence is much longer than one block's timescale band.
-- **The linear `diag` reservoir is 8× faster to train than the leaky one, but it loses the multi-timescale gain** and lands where the single-ρ tanh reservoir and the GPT are. A likely cause: under this mapping its fastest mode has τ = τ_ρ ≈ 9.5 tokens, so no mode tracks the last token or two sharply, while the leaky tanh reservoir keeps units with a = 1 that do. Whether the reservoir's nonlinearity also matters is the next thing to separate.
+- **The linear `diag` reservoir is 8× faster to train than the leaky one, but it loses the multi-timescale gain** and lands where the single-ρ tanh reservoir and the GPT are. A likely cause: under this mapping its fastest mode has τ = τ_ρ ≈ 9.5 tokens, so no mode tracks the last token or two sharply, while the leaky tanh reservoir keeps units with a = 1 that do. Since v0.6 the band starts at τ = 1.
 - **The leaky loop leaves the GPU idle.** It ran at 5.4 steps/s, about 10k tiny kernel launches per step. At this size the cost per step barely depends on batch size, so leaky runs on a GPU should use much larger batches.
 
 `benchmarks/speed.py` on the T4 (forward + backward, random tokens, tokens/s):
@@ -285,6 +285,10 @@ Tokens are streamed to disk, so 100k documents (about 113M tokens) need little R
 | hardware | `--amp` (bf16 on Ampere+, fp16 with loss scaling on T4/P100), `--compile` |
 
 Sampling options are `--temperature`, `--top_k`, `--top_p`, `--seed` and `--num_samples`.
+
+## Changes in 0.6
+
+- **`diag` timescales now start at 1 token:** τ runs from 1 to τ_ρ/a_min, times g^k with depth. Before, the band started at τ_ρ ≈ 9.5 tokens, so there were no fast modes.
 
 ## Changes in 0.5
 
