@@ -124,6 +124,35 @@ python benchmarks/run_benchmark.py --data_dir data/shakespeare_bpe1024 --emb 48 
 
 Caveats: one seed, the LAERC models have about 20% more trainable parameters than the GPT, and with a 128-token window the slowest units ($\tau \approx 1000$) never reach a steady state. The next checks are more seeds, a parameter-matched GPT and longer sequences.
 
+### Rerun on a GPU (Kaggle T4, v0.5)
+
+The same benchmark and seed, run on a free Kaggle T4 with the two new variants added. The results are in [`results/shakespeare_bpe1024_t4/results.json`](results/shakespeare_bpe1024_t4/results.json). The bpc values use the 2.41 characters per validation token.
+
+| model | best val loss | bits/char | wall time (10k steps) |
+|---|---|---|---|
+| FFN only | 4.172 | 2.497 | 1.6 min |
+| LAERC, ρ = 0.9 (tanh, fused RNN) | 3.581 | 2.143 | 2.8 min |
+| LAERC, ρ = 0.99 | 3.583 | 2.144 | 2.8 min |
+| **LAERC, multi-timescale** (leak 10⁻³…1) | **3.465** | **2.074** | 31 min |
+| LAERC, geometric depth (leak 0.1…1, g = 4) | 3.470 | 2.076 | 31 min |
+| LAERC, linear diagonal (`diag`, leak 0.1…1, g = 4) | 3.580 | 2.142 | 3.9 min |
+| GPT, same width and depth | 3.569 | 2.136 | 1.2 min |
+
+- **The multi-timescale reservoir is again the best model.** Its margin over the GPT, 0.06 bpc, is slightly larger than on the CPU.
+- **Geometric depth is as good as the multi-timescale run, but not better.** With a 128-token window, the per-unit spread up to τ ≈ 1000 already covers all the context there is. Depth scheduling should only matter once the sequence is much longer than one block's timescale band.
+- **The linear `diag` reservoir is 8× faster to train than the leaky one, but it loses the multi-timescale gain** and lands where the single-ρ tanh reservoir and the GPT are. A likely cause: under this mapping its fastest mode has τ = τ_ρ ≈ 9.5 tokens, so no mode tracks the last token or two sharply, while the leaky tanh reservoir keeps units with a = 1 that do. Whether the reservoir's nonlinearity also matters is the next thing to separate.
+- **The leaky loop leaves the GPU idle.** It ran at 5.4 steps/s, about 10k tiny kernel launches per step. At this size the cost per step barely depends on batch size, so leaky runs on a GPU should use much larger batches.
+
+`benchmarks/speed.py` on the T4 (forward + backward, random tokens, tokens/s):
+
+| D, L, T, B | FFN only | tanh (fused) | tanh leaky (loop) | diag |
+|---|---|---|---|---|
+| 128, 4, 512, 8 | 188k | 59k | 6k | 107k |
+| 256, 8, 1024, 8, fp32 | – | 13k | – | 23k |
+| 256, 8, 1024, 8, `--amp` fp16 | 137k | 27k | out of memory | 29k |
+
+`diag` is 18× faster than the leaky loop and 1.7–1.8× faster than the fused tanh RNN in fp32. With fp16 autocast the cuDNN RNN catches up, because `diag` currently keeps its scan in fp32.
+
 ## Results: Shakespeare, GPT-2 vocabulary (v0.2)
 
 Setup:
@@ -259,14 +288,14 @@ Sampling options are `--temperature`, `--top_k`, `--top_p`, `--seed` and `--num_
 
 ## Changes in 0.5
 
-- **New: `--res_mode diag`**, a frozen linear reservoir in complex-diagonal form that is computed in parallel over the sequence. On a CPU it is 3–5× faster than the leaky reservoir. It works with `--res_leak_min` and `--res_depth_growth`, and the benchmark has a `laerc_diag` run (not yet run).
+- **New: `--res_mode diag`**, a frozen linear reservoir in complex-diagonal form that is computed in parallel over the sequence. On a CPU it is 3–5× faster than the leaky reservoir. It works with `--res_leak_min` and `--res_depth_growth`, and the benchmark has a `laerc_diag` run (results on a T4 above).
 - **Faster training loop:** the loss is accumulated on the GPU and read back only every `--log_interval_steps`, instead of syncing on every micro-batch.
 - **`--amp` on T4/P100:** it now uses fp16 with loss scaling, because bf16 is only emulated before Ampere. TF32 matmuls are enabled on Ampere and newer.
 - **New: `benchmarks/speed.py`** for throughput, and a section on free Kaggle/Colab GPUs.
 
 ## Changes in 0.4
 
-- **New: geometric depth schedule.** `--res_depth_growth g` multiplies block *k*'s reservoir timescales by $g^k$, so depth grows like $\log T$ instead of $T$. It is off by default ($g = 1$), and checkpoints that lack the key load unchanged. Training prints the per-block timescales. The benchmark has a `laerc_depth` run (leak 0.1…1, $g = 4$), which isn't in the results table yet.
+- **New: geometric depth schedule.** `--res_depth_growth g` multiplies block *k*'s reservoir timescales by $g^k$, so depth grows like $\log T$ instead of $T$. It is off by default ($g = 1$), and checkpoints that lack the key load unchanged. Training prints the per-block timescales. The benchmark has a `laerc_depth` run (leak 0.1…1, $g = 4$), with results on a T4 above.
 - Run names include `leak…` and `G…` when those options are set, so runs with different options no longer share a checkpoint directory.
 
 ## Changes in 0.3
