@@ -90,6 +90,32 @@ On a CPU, `diag` is 3–5× faster than the leaky reservoir and about as fast as
 
 Since everything except the reservoir acts on one token at a time, the model can generate **incrementally**. `sample.py` carries each block's reservoir state forward, so every new token costs one step instead of a pass over the whole sequence (15× faster for 500 tokens on CPU). Feeding a sequence in pieces gives exactly the same logits as feeding it at once, and a test checks this.
 
+## Results: OpenWebText, ~5M non-embedding parameters, context 1024 (Kaggle T4, v0.6)
+
+This uses the same data and tokenizer as the LAERC experiments in Köster & Uchida, *Reservoir Computing as a Language Model* ([arXiv:2507.15779](https://arxiv.org/abs/2507.15779)): OpenWebText with GPT-2 BPE, the full 50,257-token vocabulary. Setup:
+
+- the first 100k documents, 111.8M training tokens and 1.13M validation tokens
+- context 1024, batch 8 × 2 accumulation, lr 1e-3 with warmup and cosine decay, fp16 autocast
+- 6,000 steps ≈ 98M tokens, about 0.9 epoch, so there is no data repetition
+- validation on 40 × 8 windows every 500 steps
+
+Raw logs are in [`results/owt_5m_t4/`](results/owt_5m_t4/).
+
+![OpenWebText validation curves](results/owt_5m_t4/val_curves.png)
+
+| model | non-embedding params | total (tied embedding) | val loss (nats/token) | val ppl | bits/char | wall time |
+|---|---|---|---|---|---|---|
+| LAERC `diag`, multiscale leak 0.1…1, geometric depth g = 2 (τ from 1 to 12k tokens over 8 blocks), D = 192, L = 8 | 4.76M | 14.4M | 4.991 | 147 | 1.667 | 69 min |
+| GPT, D = 216, L = 8, 4 heads | 4.72M | 15.6M | **4.570** | **96.5** | **1.526** | 62 min |
+| *Kaplan et al. 2020, L(N, D) at N = 4.75M, D = 98M* | | | *3.78* | | | |
+
+Bits per character use 4.32 characters per validation token.
+
+- **The LAERC learns faster early on, and the GPT overtakes it after ≈33M tokens.** The LAERC is ahead by 0.12 nats at 8M tokens, and the curves cross at about 33M. From there the GPT keeps improving roughly linearly in log-tokens, while the LAERC flattens out. At 98M tokens the GPT is 0.42 nats ahead. The cheap frozen-reservoir features give fast early gains, and the trained attention wins as data accumulates. That is the same qualitative picture as the paper's comparison.
+- **This is not overfitting.** The LAERC's training loss at the end (≈4.90) is close to its validation loss, so it is limited by capacity or representation, not by memorisation as on Shakespeare. The likeliest cause is the linear `diag` reservoir: the leaky tanh multiscale reservoir did better on Shakespeare, but at this size it runs at about 2k tokens/s, which would take about 13 hours here. A fused single-timescale tanh run (≈27k tokens/s) is the cheapest way to tell whether the nonlinearity or the timescale band is what's missing.
+- **The Kaplan reference** comes from the scaling law fitted on WebText2, an OpenWebText-like corpus with the same GPT-2 tokenizer and non-embedding N. It assumes large, well-tuned batches and training to convergence. These runs used 16k tokens per step for only 6,000 steps, with no tuning, and both curves are still falling. So the gap to 3.78 mostly reflects the short, small-batch training. The comparison that counts is LAERC versus GPT under identical conditions.
+- **Speed:** at T = 1024 and this size, the `diag` LAERC is about 12% slower in wall time than the GPT. The 50k-token output layer dominates both runs.
+
 ## Results: Shakespeare, ~200k parameters, 1,024-token BPE
 
 Setup:
