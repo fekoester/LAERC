@@ -153,6 +153,23 @@ The same benchmark and seed, run on a free Kaggle T4 with the two new variants a
 
 `diag` is 18× faster than the leaky loop and 1.7–1.8× faster than the fused tanh RNN in fp32. With fp16 autocast the cuDNN RNN catches up, because `diag` currently keeps its scan in fp32.
 
+### Fixed `diag` and a 5M model at 1024 context (Kaggle T4, v0.6)
+
+**The `diag` fix (#7) works.** With modes starting at τ = 1 token, `laerc_diag` reaches **2.092 bpc** on the 200k / 128-context benchmark, against 2.142 before. That recovers about 70% of the gap to the leaky multiscale reservoir (2.074) at 8× less training time.
+
+**~5M parameters, 1024-token context**, same Shakespeare BPE-1024 data. Both models use batch 16 × 1024, lr 1e-3 and 1,500 steps (≈25M tokens, about 6 passes over the 3.8M training tokens), with validation every 100 steps:
+
+| model | trainable params | best val loss | bits/char | best at step | wall time |
+|---|---|---|---|---|---|
+| LAERC `diag`, leak 0.1…1, g = 2 (τ from 1 to 12k tokens over 8 blocks), D = 192, L = 8 | 4.95M | 3.560 | 2.130 | 1200, then rising | 14.2 min |
+| GPT, D = 216, L = 8 | 4.94M | **3.443** | **2.060** | 1500, still falling | 8.9 min |
+
+- **At this size the corpus is too small for the LAERC, and it overfits.** At step 1200 its training loss is 2.76 nats/token against 3.56 on validation, and validation gets worse from there. The GPT generalises better: it is still improving at step 1500. This is the same pattern as the train–test gap reported in Köster & Uchida, *Reservoir Computing as a Language Model* ([arXiv:2507.15779](https://arxiv.org/abs/2507.15779)). The 5M LAERC is also worse than the 200k one (2.074 bpc), so 3.8M tokens can't support it.
+- **Throughput at this size** (`speed.py`, forward + backward, fp32, tokens/s): leaky tanh 2.0k, fused tanh 26.9k, `diag` 31.5k, FFN only 116k. `diag` makes the multiscale and geometric-memory reservoir 16× faster, so a leaky run like this would have taken about 3.5 h instead of 14 min. At T = 1024 the GPT still trains about 1.6× faster in wall time.
+- **For reference** (different setups, so read these as orders of magnitude only):
+  - The character-level models in the paper above reach 1.67 / 1.73 / 1.81 nats/char, or 2.41 / 2.50 / 2.61 bpc, for transformer / attention-enhanced RC / classic RC. That is at ≤155k parameters, 32-character context, on the same corpus lowercased.
+  - nanoGPT's `shakespeare_char` reaches 1.47 nats/char, about 2.12 bpc, with 10.7M parameters on the 1 MB Tiny Shakespeare.
+
 ## Results: Shakespeare, GPT-2 vocabulary (v0.2)
 
 Setup:
