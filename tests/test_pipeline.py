@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from laerc import TrainConfig, finalize_config
-from laerc.data import eval_windows, get_batch
+from laerc.data import eval_windows, get_batch, load_meta
 from laerc.train import train
 from laerc.utils import load_checkpoint
 
@@ -86,3 +86,15 @@ def test_train_and_sample_diag_reservoir(data_dir, tmp_path):
                           str(tmp_path / "ck"), "--prompt", "To be", "--max_tokens", "10", "--seed", "0"],
                          capture_output=True, text=True, check=True)
     assert res.stdout.startswith("To be")
+
+
+
+def test_train_accepts_non_laerc_model(data_dir, tmp_path):
+    """The benchmark passes its GPT baseline to train(); it has no reservoir_timescales()."""
+    from benchmarks.gpt_baseline import GPT
+
+    c = finalize_config(TrainConfig(data_dir=data_dir, seq=16, emb=16, layers=1, batch=4, accum=1, lr=3e-3,
+                                    epochs=1, steps_per_epoch=2, eval_interval_steps=2, eval_batches=1,
+                                    log_interval_steps=1, ckpt_dir=str(tmp_path / "ck"), flush_every=1))
+    vocab = load_meta(data_dir)["vocab_size"]
+    assert train(c, model=GPT(vocab, 16, 1, heads=2, max_len=16))["steps"] == 2

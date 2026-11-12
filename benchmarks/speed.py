@@ -41,18 +41,24 @@ def main():
         m = ReservoirFFNLanguageModel(a.vocab, a.emb, a.layers, device=dev, **VARIANTS[name]).to(dev)
         idx = torch.randint(0, a.vocab, (a.batch, a.seq), device=dev)
         times = []
-        for i in range(a.iters + 2):
-            if dev.type == "cuda":
-                torch.cuda.synchronize()
-            t = time.perf_counter()
-            with torch.autocast(dev.type, dtype=amp_dtype, enabled=a.amp and dev.type == "cuda"):
-                _, loss = m(idx, idx)
-            loss.backward()
-            m.zero_grad(set_to_none=True)
-            if dev.type == "cuda":
-                torch.cuda.synchronize()
-            if i >= 2:
-                times.append(time.perf_counter() - t)
+        try:
+            for i in range(a.iters + 2):
+                if dev.type == "cuda":
+                    torch.cuda.synchronize()
+                t = time.perf_counter()
+                with torch.autocast(dev.type, dtype=amp_dtype, enabled=a.amp and dev.type == "cuda"):
+                    _, loss = m(idx, idx)
+                loss.backward()
+                m.zero_grad(set_to_none=True)
+                if dev.type == "cuda":
+                    torch.cuda.synchronize()
+                if i >= 2:
+                    times.append(time.perf_counter() - t)
+        except torch.OutOfMemoryError:
+            print(f"{name:11s} out of memory")
+            del m
+            torch.cuda.empty_cache()
+            continue
         dt = sorted(times)[len(times) // 2]
         print(f"{name:11s} {dt * 1000:8.1f} ms/step  {a.batch * a.seq / dt:10,.0f} tokens/s")
 
