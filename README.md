@@ -148,8 +148,8 @@ The same benchmark and seed, run on a free Kaggle T4 with the two new variants a
 | D, L, T, B | FFN only | tanh (fused) | tanh leaky (loop) | diag |
 |---|---|---|---|---|
 | 128, 4, 512, 8 | 188k | 59k | 6k | 107k |
-| 256, 8, 1024, 8, fp32 | – | 13k | out of memory | 23k |
-| 256, 8, 1024, 8, `--amp` fp16 | 137k | 27k | – | 29k |
+| 256, 8, 1024, 8, fp32 | – | 13k | – | 23k |
+| 256, 8, 1024, 8, `--amp` fp16 | 137k | 27k | out of memory | 29k |
 
 `diag` is 18× faster than the leaky loop and 1.7–1.8× faster than the fused tanh RNN in fp32. With fp16 autocast the cuDNN RNN catches up, because `diag` currently keeps its scan in fp32.
 
