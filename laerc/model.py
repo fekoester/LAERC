@@ -96,19 +96,18 @@ class DiagReservoir(nn.Module):
         h_t = lam * h_{t-1} + gamma * B x_t,   features = [Re h_t, Im h_t]   (N = R/2 complex modes)
 
     A linear reservoir h_t = W h_{t-1} + U x_t is, after diagonalising W, exactly this with lam = eig(W),
-    so it is sampled directly: |lam_i| = exp(-1/tau_i) with tau_i log-spaced (rates a_i as for the leaky
-    reservoir: tau_i = tau_rho / a_i, tau_rho = 1 / ln(1/rho)), phases uniform in [0, pi] (the conjugate
-    halves are implied by taking Re and Im), and gamma = sqrt(1 - |lam|^2) so every mode has unit variance.
+    so it is sampled directly: |lam_i| = exp(-1/tau_i) with tau_i log-spaced in [tau_min, tau_max],
+    phases uniform in [0, pi] (the conjugate halves are implied by taking Re and Im), and
+    gamma = sqrt(1 - |lam|^2) so every mode has unit variance.
     No R x R matmul per step and no sequential loop over tokens: see diag_scan.
     """
 
-    def __init__(self, D: int, R: int, rho: float, rates: torch.Tensor, device=None):
+    def __init__(self, D: int, R: int, tau_min: float, tau_max: float, device=None):
         super().__init__()
-        if not 0.0 < rho < 1.0:
-            raise ValueError("res_mode='diag' needs 0 < res_radius < 1")
+        if not 0.0 < tau_min <= tau_max:
+            raise ValueError("need 0 < tau_min <= tau_max")
         self.N = R // 2
-        rates = rates[torch.linspace(0, len(rates) - 1, self.N).round().long()].double()
-        tau = (1.0 / math.log(1.0 / rho)) / rates
+        tau = torch.logspace(math.log10(tau_min), math.log10(tau_max), self.N, dtype=torch.float64)
         log_mag = -1.0 / tau
         theta = torch.rand(self.N, dtype=torch.float64) * math.pi
         gamma = torch.sqrt(-torch.expm1(2.0 * log_mag))
@@ -168,8 +167,13 @@ class ReservoirBlock(nn.Module):
 
         # reservoir
         if use_reservoir and self.R > 1 and res_mode == "diag":
-            rates = torch.logspace(math.log10(res_leak_min), 0.0, self.R) * res_leak_scale
-            self.diag = DiagReservoir(D, self.R, reservoir_radius, rates, device=device)
+            # modes from tau = 1 token (tracks the last token, like the a = 1 units of the leaky reservoir) up to
+            # tau_rho / res_leak_min, tau_rho = 1/ln(1/rho); the depth schedule shifts the band by 1/res_leak_scale
+            if not 0.0 < reservoir_radius < 1.0:
+                raise ValueError("res_mode='diag' needs 0 < res_radius < 1")
+            tau_rho = 1.0 / math.log(1.0 / reservoir_radius)
+            self.diag = DiagReservoir(D, self.R, 1.0 / res_leak_scale, max(1.0, tau_rho / res_leak_min) / res_leak_scale,
+                                      device=device)
             self.R = 2 * self.diag.N
             self.rnn = None
         elif use_reservoir and self.R > 0:
