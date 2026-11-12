@@ -38,6 +38,33 @@ $$
 
 Units with $a\approx 1$ behave like the plain reservoir and keep the last few tokens precisely; units with $a \ll 1$ are near-linear running averages with timescale $\tau\approx 1/a$ that summarise the wider context. Every decade of $\tau$ gets the same number of units. $U$ and $W$ stay frozen and random, and the number of trainable parameters does not change. The recurrence then runs as a Python loop instead of the fused `nn.RNN` kernel, which makes training about 1.8× slower on CPU.
 
+### Geometric depth schedule (`--res_depth_growth`)
+
+Stacking reservoirs makes deeper layers see further back, but only additively. Linearise block $k$ around its operating point as a leaky filter with impulse response $g(t)\propto e^{-t/\tau}$. Each block filters the output of the block below, so the kernels convolve, and block $L$ responds to a token from $t$ steps ago with a gamma kernel:
+
+$$
+g_L(t) \;\propto\; t^{\,L-1} e^{-t/\tau}, \qquad \langle t\rangle = L\tau,\quad \sigma_t = \sqrt{L}\,\tau .
+$$
+
+So $L$ identical blocks reach about $L\tau$ tokens (500 → 1000 → 1500 …). Block $L$ also mostly holds a band around $L\tau$ rather than everything up to it, while the residual stream keeps the recent tokens. Reaching a context of $T$ tokens this way needs depth that grows linearly in $T$.
+
+`--res_depth_growth g` makes the timescales grow geometrically with depth instead. Block $k$'s leak rates are divided by $g^k$:
+
+$$
+a^{(k)}_i = g^{-k}\, a_i, \qquad \tau^{(k)} \in \big[\,g^{k},\; g^{k}/a_{\min}\big]\ \text{tokens},
+$$
+
+so the last block reaches about $g^{L-1}/a_{\min}$ tokens, and a context of $T$ needs only $L \approx \log_g T$ blocks. This is the idea behind Clockwork RNNs and dilated convolutions, and, taken to its limit, scale-invariant memories such as HiPPO-LegS and Legendre Memory Units. It combines with `--res_leak_min`: each block keeps its own band of $\log_{10}(1/a_{\min})$ decades, and $g$ shifts that band further back from block to block. Choosing $g \approx 1/a_{\min}$ makes the bands tile without gaps, for example `--res_leak_min 0.1 --res_depth_growth 10`. With `--res_leak_min 1` each block has a single timescale $g^k$, and block 0 stays the fused plain reservoir. Training prints the timescale band of every block, and the default $g = 1$ leaves the model exactly as before.
+
+The effect, measured in a test: perturb the first of 150 tokens in an untrained 4-block model and look at each block's reservoir state at the end.
+
+| block | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| $g = 1$ (plain stack) | 2e-7 | 8e-7 | 1e-6 | 1e-6 |
+| $g = 4$ (τ = 1, 4, 16, 64) | 2e-7 | 3e-7 | 5e-3 | 7e-2 |
+
+This makes the *horizon* long, not the *recall* exact. Each block still has a fixed state size $R$, and an echo-state network's linear memory capacity is bounded, $\sum_k \mathrm{MC}_k \le R$. So the further back the context, the coarser the summary: the resolution falls off roughly like $1/t$. Gist and topic survive, but copying an exact token from 50k tokens ago does not. That needs a state that grows with context, such as a KV cache, or a retrieval side channel.
+
 Since everything except the reservoir acts on one token at a time, the model can generate **incrementally**. `sample.py` carries each block's reservoir state forward, so every new token costs one step instead of a pass over the whole sequence (15× faster for 500 tokens on CPU). Feeding a sequence in pieces gives exactly the same logits as feeding it at once, and a test checks this.
 
 ## Results: Shakespeare, ~200k parameters, 1,024-token BPE
@@ -184,13 +211,18 @@ Tokens are streamed to disk, so 100k documents (about 113M tokens) need little R
 | group | flags |
 |---|---|
 | data | `--data_dir`, `--seq`, `--vocab` (taken from `meta.json` when present) |
-| model | `--emb`, `--layers`, `--resv_mult` (R = mult·D), `--res_mlp_mult`, `--ffn_mult`, `--res_radius`, `--res_scale {radius,norm}`, `--res_leak_min` (< 1: multi-timescale), `--no_reservoir` |
+| model | `--emb`, `--layers`, `--resv_mult` (R = mult·D), `--res_mlp_mult`, `--ffn_mult`, `--res_radius`, `--res_scale {radius,norm}`, `--res_leak_min` (< 1: multi-timescale), `--res_depth_growth` (> 1: geometric depth schedule), `--no_reservoir` |
 | optimization | `--batch`, `--accum`, `--lr`, `--weight_decay`, `--grad_clip`, `--beta2`, `--epochs`, `--steps_per_epoch` |
 | schedule | `--no_sched`, `--warmup_frac`, `--hold_frac`, `--min_lr_ratio` |
 | evaluation | `--eval_interval_steps`, `--eval_batches`, `--resume` |
 | hardware | `--amp` (bf16 on CUDA), `--compile` |
 
 Sampling options are `--temperature`, `--top_k`, `--top_p`, `--seed` and `--num_samples`.
+
+## Changes in 0.4
+
+- **New: geometric depth schedule.** `--res_depth_growth g` multiplies block *k*'s reservoir timescales by $g^k$, so depth grows like $\log T$ instead of $T$. It is off by default ($g = 1$), and checkpoints that lack the key load unchanged. Training prints the per-block timescales. The benchmark has a `laerc_depth` run (leak 0.1…1, $g = 4$), which isn't in the results table yet.
+- Run names include `leak…` and `G…` when those options are set, so runs with different options no longer share a checkpoint directory.
 
 ## Changes in 0.3
 

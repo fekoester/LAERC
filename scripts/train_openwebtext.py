@@ -28,6 +28,8 @@ def build_argparser():
     ap.add_argument("--res_radius", type=float, default=0.9)
     ap.add_argument("--res_leak_min", type=float, default=1.0,
                     help="< 1: multi-timescale leaky reservoir, per-unit leak rates log-spaced in [this, 1]")
+    ap.add_argument("--res_depth_growth", type=float, default=1.0,
+                    help="> 1: geometric depth schedule, block k's reservoir timescales are this**k times longer")
     ap.add_argument("--res_scale", type=str, default="radius", choices=["radius", "norm"],
                     help="scale the reservoir's spectral radius (default) or, as in v0.1, its spectral norm")
     ap.add_argument("--no_reservoir", action="store_true", help="Disable reservoir path (pure FFN model)")
@@ -85,6 +87,7 @@ def main():
         res_radius=args.res_radius,
         res_scale=args.res_scale,
         res_leak_min=args.res_leak_min,
+        res_depth_growth=args.res_depth_growth,
         use_reservoir=not args.no_reservoir,
         batch=args.batch,
         accum=args.accum,

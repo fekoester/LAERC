@@ -54,6 +54,9 @@ def train(cfg: TrainConfig, model=None):
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_embed = model.embed.weight.numel()
     print(f"Model parameters: total={n_params:,} | trainable={n_trainable:,} | embedding (tied)={n_embed:,}")
+    taus = [t for t in model.reservoir_timescales() if t is not None]
+    if any(t != (1.0, 1.0) for t in taus):
+        print("Reservoir leak timescales (tokens): " + ", ".join(f"{lo:.3g}-{hi:.3g}" for lo, hi in taus))
 
     opt = build_optimizer(model, lr=cfg.lr, weight_decay=cfg.weight_decay, beta2=cfg.beta2)
 

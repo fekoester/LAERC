@@ -73,12 +73,15 @@ class ReservoirBlock(nn.Module):
         use_reservoir: bool = True,
         res_scale: str = "radius",
         res_leak_min: float = 1.0,
+        res_leak_scale: float = 1.0,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
         super().__init__()
+        if not 0.0 < res_leak_min <= 1.0 or not 0.0 < res_leak_scale <= 1.0:
+            raise ValueError("res_leak_min and res_leak_scale must lie in (0, 1]")
         self.D = D
-        self.leaky = use_reservoir and res_leak_min < 1.0
+        self.leaky = use_reservoir and (res_leak_min < 1.0 or res_leak_scale < 1.0)
         self.R = int(D * reservoir_mult)
         self.H_res = int(D * reservoir_mlp_mult)
         self.H_ff = int(D * ff_mult)
@@ -127,7 +130,10 @@ class ReservoirBlock(nn.Module):
                 # multi-timescale (leaky) reservoir: unit i integrates with its own leak rate a_i,
                 #   h_t = (1 - a) * h_{t-1} + a * tanh(U x_t + W h_{t-1}),
                 # a log-spaced in [res_leak_min, 1] -> memory timescales from ~1 to ~1/res_leak_min tokens.
+                # res_leak_scale multiplies all rates, i.e. shifts the whole band to timescales 1/res_leak_scale
+                # times longer (set per layer by the model's res_depth_growth).
                 leak = torch.logspace(math.log10(res_leak_min), 0.0, self.R, device=device, dtype=param_dtype)
+                leak = leak * res_leak_scale
                 self.register_buffer("leak", leak)
             self.res_mlp = nn.Sequential(
                 nn.LayerNorm(self.R),
@@ -219,16 +225,24 @@ class ReservoirFFNLanguageModel(nn.Module):
         use_reservoir: bool = True,
         res_scale: str = "radius",
         res_leak_min: float = 1.0,
+        res_depth_growth: float = 1.0,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
+        """
+        res_depth_growth = g > 1 gives the layers geometrically growing timescales: block k's leak rates are
+        divided by g**k, so its memory band sits g**k times further back. Stacking L equal blocks only adds
+        horizons (~L * tau); a geometric schedule reaches ~g**(L-1) * tau, i.e. depth ~ log(context).
+        """
         super().__init__()
+        if res_depth_growth < 1.0:
+            raise ValueError("res_depth_growth must be >= 1")
         self.V = vocab_size
         self.D = D
 
         self.embed = nn.Embedding(vocab_size, D)
         blocks = []
-        for _ in range(num_layers):
+        for k in range(num_layers):
             blk = ReservoirBlock(
                 D=D,
                 reservoir_mult=reservoir_mult,
@@ -238,6 +252,7 @@ class ReservoirFFNLanguageModel(nn.Module):
                 use_reservoir=use_reservoir,
                 res_scale=res_scale,
                 res_leak_min=res_leak_min,
+                res_leak_scale=float(res_depth_growth) ** -k,
                 device=device,
                 dtype=dtype,
             )
@@ -247,6 +262,22 @@ class ReservoirFFNLanguageModel(nn.Module):
         self.out = nn.Linear(D, vocab_size, bias=False)
 
         self._init_weights(tie_weights=True)
+
+    def reservoir_timescales(self) -> list[tuple[float, float] | None]:
+        """Per block (tau_min, tau_max) = (1/a_max, 1/a_min) in tokens; (1, 1) for a plain reservoir, None without.
+
+        This is the leak timescale alone; the recurrence W (spectral radius rho) stretches each mode by up to
+        about 1/(1 - rho) on top of it.
+        """
+        out = []
+        for blk in self.blocks:
+            if blk.rnn is None:
+                out.append(None)
+            elif blk.leaky:
+                out.append((1.0 / blk.leak.max().item(), 1.0 / blk.leak.min().item()))
+            else:
+                out.append((1.0, 1.0))
+        return out
 
     def _init_weights(self, tie_weights: bool = True) -> None:
         with torch.no_grad():
@@ -304,7 +335,8 @@ def build_model(cfg, device=None, dtype=None) -> "ReservoirFFNLanguageModel":
         reservoir_mult=get("resv_mult", 4.0), reservoir_mlp_mult=get("res_mlp_mult", 1.0),
         ff_mult=get("ffn_mult", 4.0), reservoir_radius=get("res_radius", 0.9),
         use_reservoir=get("use_reservoir", True), res_scale=get("res_scale", "norm"),
-        res_leak_min=get("res_leak_min", 1.0) or 1.0, device=device, dtype=dtype,
+        res_leak_min=get("res_leak_min", 1.0) or 1.0, res_depth_growth=get("res_depth_growth", 1.0) or 1.0,
+        device=device, dtype=dtype,
     )
 
 
