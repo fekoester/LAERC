@@ -34,7 +34,15 @@ def train(cfg: TrainConfig, model=None):
     """Train; `model` overrides the LAERC model (any module with forward(idx, targets) -> (logits, loss))."""
     device = get_device()
     use_amp = bool(cfg.amp) and device.type == "cuda"
-    amp_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
+    # bf16 needs Ampere or newer; free-tier T4 / P100 GPUs get fp16 with loss scaling instead
+    amp_dtype = torch.bfloat16 if use_amp and torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    amp_ctx = torch.autocast("cuda", dtype=amp_dtype) if use_amp else nullcontext()
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype == torch.float16)
+    if device.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True  # no effect before Ampere
+        torch.backends.cudnn.allow_tf32 = True
+    if use_amp:
+        print(f"[amp] autocast {str(amp_dtype).replace('torch.', '')}{' + loss scaling' if scaler.is_enabled() else ''}")
 
     # data
     train_tokens, val_tokens = load_memmap_tokens(cfg.data_dir)
@@ -109,8 +117,9 @@ def train(cfg: TrainConfig, model=None):
         first = global_step - (ep - 1) * steps_per_epoch + 1
         pbar = tqdm(total=steps_per_epoch, initial=first - 1, desc=f"Epoch {ep}", dynamic_ncols=True)
         cur_lr = opt.param_groups[0]["lr"]
-        running_loss, running_steps = 0.0, 0
-        window_loss, window_steps = 0.0, 0
+        # losses are summed on the device and only read back every log_interval_steps (no sync per step)
+        running_loss, running_steps = torch.zeros((), device=device), 0
+        window_loss, window_steps = torch.zeros((), device=device), 0
 
         for step_in_epoch in range(first, steps_per_epoch + 1):
             opt.zero_grad(set_to_none=True)
@@ -118,26 +127,28 @@ def train(cfg: TrainConfig, model=None):
                 xb, yb = get_batch(train_tokens, cfg.seq, cfg.batch, device)
                 with amp_ctx:
                     _, loss = fwd(xb, yb)
-                raw = loss.item()
+                raw = loss.detach()
                 running_loss += raw
                 running_steps += 1
                 window_loss += raw
                 window_steps += 1
-                (loss / cfg.accum).backward()
+                scaler.scale(loss / cfg.accum).backward()
 
             if cfg.grad_clip > 0.0:
+                scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-            opt.step()
+            scaler.step(opt)
+            scaler.update()
             if sched is not None:
                 sched.step()
                 cur_lr = opt.param_groups[0]["lr"]
             global_step += 1
 
-            pbar.set_postfix(loss=f"{running_loss / max(1, running_steps):.4f}", lr=f"{cur_lr:.2e}")
             if (global_step % cfg.log_interval_steps) == 0 and window_steps > 0:
-                logger.log_row([global_step, ep, step_in_epoch, f"{window_loss / window_steps:.6f}",
+                pbar.set_postfix(loss=f"{running_loss.item() / max(1, running_steps):.4f}", lr=f"{cur_lr:.2e}")
+                logger.log_row([global_step, ep, step_in_epoch, f"{window_loss.item() / window_steps:.6f}",
                                 f"{cur_lr:.6e}", time.strftime("%Y-%m-%d %H:%M:%S")])
-                window_loss, window_steps = 0.0, 0
+                window_loss, window_steps = torch.zeros((), device=device), 0
             if cfg.eval_interval_steps > 0 and global_step % cfg.eval_interval_steps == 0:
                 run_eval()
             pbar.update(1)

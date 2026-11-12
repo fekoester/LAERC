@@ -33,6 +33,7 @@ RUNS = {
     "laerc_r0.99": dict(res_scale="radius", res_radius=0.99),
     "laerc_multi": dict(res_scale="radius", res_radius=0.9, res_leak_min=1e-3),
     "laerc_depth": dict(res_scale="radius", res_radius=0.9, res_leak_min=0.1, res_depth_growth=4.0),
+    "laerc_diag": dict(res_mode="diag", res_radius=0.9, res_leak_min=0.1, res_depth_growth=4.0),
     "gpt": dict(),
 }
 LABELS = {
@@ -42,6 +43,7 @@ LABELS = {
     "laerc_r0.99": "LAERC, ρ = 0.99",
     "laerc_multi": "LAERC, multi-timescale (ρ = 0.9, leak 1e-3…1)",
     "laerc_depth": "LAERC, geometric depth (leak 0.1…1, ×1/4 per layer)",
+    "laerc_diag": "LAERC, linear diagonal reservoir (leak 0.1…1, ×1/4 per layer)",
     "gpt": "GPT (small Transformer)",
 }
 

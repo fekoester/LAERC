@@ -61,6 +61,78 @@ def spectral_radius(W: torch.Tensor) -> float:
     return torch.linalg.eigvals(W.detach().double().cpu()).abs().max().item()
 
 
+def diag_scan(u: torch.Tensor, log_lam: torch.Tensor, h0: torch.Tensor | None = None, chunk: int = 32):
+    """h_t = lam * h_{t-1} + u_t for a complex diagonal lam = exp(log_lam), all t at once.
+
+    u: (B, T, N) complex, log_lam: (N,) complex with Re < 0, h0: (B, N) complex or None.
+    Within chunks of C steps the recurrence is one (C x C) Toeplitz matmul per mode; the chunks are then
+    chained by a short loop over T / C carries. Only non-negative powers of lam appear, so it is stable,
+    and the work is O(B T N C) in parallel instead of T sequential steps. Returns (h (B,T,N), h_T (B,N)).
+    """
+    B, T, N = u.shape
+    C = max(1, min(chunk, T))
+    K = -(-T // C)
+    if K * C != T:
+        u = F.pad(u, (0, 0, 0, K * C - T))
+    i = torch.arange(C, device=u.device)
+    diff = (i[:, None] - i[None, :]).to(log_lam.real.dtype)  # (C, C)
+    L = torch.exp(diff[..., None] * log_lam) * (diff >= 0)[..., None]  # (C, C, N): lam^(i-j), lower triangular
+    uc = u.reshape(B, K, C, N)
+    y = torch.einsum("ijn,bkjn->bkin", L, uc)
+    decay = torch.exp((i + 1).to(log_lam.real.dtype)[:, None] * log_lam)  # (C, N): lam^(i+1)
+    carry = u.new_zeros(B, N) if h0 is None else h0
+    outs = []
+    for k in range(K):
+        yk = y[:, k] + decay * carry[:, None]
+        outs.append(yk)
+        carry = yk[:, -1]
+    h = torch.stack(outs, dim=1).reshape(B, K * C, N)[:, :T]
+    return h, h[:, -1]
+
+
+class DiagReservoir(nn.Module):
+    """Frozen linear reservoir in modal (complex diagonal) form.
+
+        h_t = lam * h_{t-1} + gamma * B x_t,   features = [Re h_t, Im h_t]   (N = R/2 complex modes)
+
+    A linear reservoir h_t = W h_{t-1} + U x_t is, after diagonalising W, exactly this with lam = eig(W),
+    so it is sampled directly: |lam_i| = exp(-1/tau_i) with tau_i log-spaced (rates a_i as for the leaky
+    reservoir: tau_i = tau_rho / a_i, tau_rho = 1 / ln(1/rho)), phases uniform in [0, pi] (the conjugate
+    halves are implied by taking Re and Im), and gamma = sqrt(1 - |lam|^2) so every mode has unit variance.
+    No R x R matmul per step and no sequential loop over tokens: see diag_scan.
+    """
+
+    def __init__(self, D: int, R: int, rho: float, rates: torch.Tensor, device=None):
+        super().__init__()
+        if not 0.0 < rho < 1.0:
+            raise ValueError("res_mode='diag' needs 0 < res_radius < 1")
+        self.N = R // 2
+        rates = rates[torch.linspace(0, len(rates) - 1, self.N).round().long()].double()
+        tau = (1.0 / math.log(1.0 / rho)) / rates
+        log_mag = -1.0 / tau
+        theta = torch.rand(self.N, dtype=torch.float64) * math.pi
+        gamma = torch.sqrt(-torch.expm1(2.0 * log_mag))
+        Bm = torch.randn(D, 2 * self.N, dtype=torch.float64) / math.sqrt(2.0 * D)
+        Bm = Bm * torch.cat([gamma, gamma])[None, :]
+        self.register_buffer("log_mag", log_mag.float().to(device))
+        self.register_buffer("theta", theta.float().to(device))
+        self.register_buffer("B_in", Bm.float().to(device))  # (D, 2N): [real part | imaginary part]
+
+    @property
+    def timescales(self) -> tuple[float, float]:
+        tau = -1.0 / self.log_mag
+        return tau.min().item(), tau.max().item()
+
+    def forward(self, x: torch.Tensor, h0: torch.Tensor | None = None):
+        """x: (B, T, D) real; h0: (1, B, N) complex or None. Returns features (B, T, 2N) and h_T (1, B, N)."""
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            p = x.float() @ self.B_in
+            u = torch.complex(p[..., : self.N], p[..., self.N:])
+            log_lam = torch.complex(self.log_mag, self.theta)
+            h, h_T = diag_scan(u, log_lam, None if h0 is None else h0[0])
+            return torch.cat([h.real, h.imag], dim=-1), h_T.unsqueeze(0)
+
+
 class ReservoirBlock(nn.Module):
     """Single LAERC block: reservoir + gate + FFN."""
     def __init__(
@@ -74,15 +146,19 @@ class ReservoirBlock(nn.Module):
         res_scale: str = "radius",
         res_leak_min: float = 1.0,
         res_leak_scale: float = 1.0,
+        res_mode: str = "tanh",
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
         super().__init__()
+        if res_mode not in ("tanh", "diag"):
+            raise ValueError("res_mode must be 'tanh' or 'diag'")
         if not 0.0 < res_leak_min <= 1.0 or not 0.0 < res_leak_scale <= 1.0:
             raise ValueError("res_leak_min and res_leak_scale must lie in (0, 1]")
         self.D = D
-        self.leaky = use_reservoir and (res_leak_min < 1.0 or res_leak_scale < 1.0)
+        self.leaky = use_reservoir and res_mode == "tanh" and (res_leak_min < 1.0 or res_leak_scale < 1.0)
         self.R = int(D * reservoir_mult)
+        self.diag = None
         self.H_res = int(D * reservoir_mlp_mult)
         self.H_ff = int(D * ff_mult)
         self.use_reservoir = use_reservoir
@@ -91,7 +167,12 @@ class ReservoirBlock(nn.Module):
         param_dtype = dtype if dtype is not None else torch.float32
 
         # reservoir
-        if use_reservoir and self.R > 0:
+        if use_reservoir and self.R > 1 and res_mode == "diag":
+            rates = torch.logspace(math.log10(res_leak_min), 0.0, self.R) * res_leak_scale
+            self.diag = DiagReservoir(D, self.R, reservoir_radius, rates, device=device)
+            self.R = 2 * self.diag.N
+            self.rnn = None
+        elif use_reservoir and self.R > 0:
             rnn = nn.RNN(
                 input_size=D,
                 hidden_size=self.R,
@@ -126,6 +207,7 @@ class ReservoirBlock(nn.Module):
                 p.requires_grad = False
 
             self.rnn = rnn
+        if use_reservoir and self.R > 0:
             if self.leaky:
                 # multi-timescale (leaky) reservoir: unit i integrates with its own leak rate a_i,
                 #   h_t = (1 - a) * h_{t-1} + a * tanh(U x_t + W h_{t-1}),
@@ -173,12 +255,14 @@ class ReservoirBlock(nn.Module):
         h = self.ln_in(x)
         h_T = None
 
-        if self.rnn is not None:
+        if self.res_mlp is not None:
             # cuDNN RNN sometimes chokes on non-contiguous inputs, especially under torch.compile
             h_contig = h.contiguous()
-            if h0 is not None:
+            if h0 is not None and not h0.is_complex():
                 h0 = h0.to(h_contig.dtype)
-            if self.leaky:
+            if self.diag is not None:
+                r, h_T = self.diag(h_contig, h0)
+            elif self.leaky:
                 r, h_T = self._leaky_scan(h_contig, h0)
             else:
                 r, h_T = self.rnn(h_contig, h0)
@@ -226,10 +310,14 @@ class ReservoirFFNLanguageModel(nn.Module):
         res_scale: str = "radius",
         res_leak_min: float = 1.0,
         res_depth_growth: float = 1.0,
+        res_mode: str = "tanh",
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
         """
+        res_mode: "tanh" (nonlinear echo-state reservoir, the original) or "diag" (frozen linear reservoir in
+        complex-diagonal form, computed in parallel over the sequence; see DiagReservoir).
+
         res_depth_growth = g > 1 gives the layers geometrically growing timescales: block k's leak rates are
         divided by g**k, so its memory band sits g**k times further back. Stacking L equal blocks only adds
         horizons (~L * tau); a geometric schedule reaches ~g**(L-1) * tau, i.e. depth ~ log(context).
@@ -253,6 +341,7 @@ class ReservoirFFNLanguageModel(nn.Module):
                 res_scale=res_scale,
                 res_leak_min=res_leak_min,
                 res_leak_scale=float(res_depth_growth) ** -k,
+                res_mode=res_mode,
                 device=device,
                 dtype=dtype,
             )
@@ -264,15 +353,18 @@ class ReservoirFFNLanguageModel(nn.Module):
         self._init_weights(tie_weights=True)
 
     def reservoir_timescales(self) -> list[tuple[float, float] | None]:
-        """Per block (tau_min, tau_max) = (1/a_max, 1/a_min) in tokens; (1, 1) for a plain reservoir, None without.
+        """Per block (tau_min, tau_max) in tokens: 1/a for the leaky tanh reservoir, the exact mode decay times
+        for res_mode="diag", (1, 1) for a plain tanh reservoir, None without one.
 
         This is the leak timescale alone; the recurrence W (spectral radius rho) stretches each mode by up to
         about 1/(1 - rho) on top of it.
         """
         out = []
         for blk in self.blocks:
-            if blk.rnn is None:
+            if blk.res_mlp is None:
                 out.append(None)
+            elif blk.diag is not None:
+                out.append(blk.diag.timescales)
             elif blk.leaky:
                 out.append((1.0 / blk.leak.max().item(), 1.0 / blk.leak.min().item()))
             else:
@@ -336,6 +428,7 @@ def build_model(cfg, device=None, dtype=None) -> "ReservoirFFNLanguageModel":
         ff_mult=get("ffn_mult", 4.0), reservoir_radius=get("res_radius", 0.9),
         use_reservoir=get("use_reservoir", True), res_scale=get("res_scale", "norm"),
         res_leak_min=get("res_leak_min", 1.0) or 1.0, res_depth_growth=get("res_depth_growth", 1.0) or 1.0,
+        res_mode=get("res_mode", "tanh") or "tanh",
         device=device, dtype=dtype,
     )
 

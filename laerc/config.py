@@ -19,6 +19,7 @@ class TrainConfig:
     res_scale: str = "radius"  # "radius" (true spectral radius) | "norm" (v0.1 behaviour)
     use_reservoir: bool = True
     res_leak_min: float = 1.0  # < 1: leaky multi-timescale reservoir, leak rates log-spaced in [res_leak_min, 1]
+    res_mode: str = "tanh"  # "tanh": nonlinear ESN (original) | "diag": frozen linear modal reservoir, parallel in T
     res_depth_growth: float = 1.0  # > 1: block k's timescales are res_depth_growth**k times longer (geometric depth)
 
     # optimization
@@ -39,7 +40,7 @@ class TrainConfig:
 
     # hardware
     compile: bool = False
-    amp: bool = False  # bf16 autocast on CUDA (float32 otherwise)
+    amp: bool = False  # autocast on CUDA: bf16 on Ampere+, fp16 with loss scaling on older GPUs (T4, P100)
     grad_accum_fp32: bool = True  # kept for compatibility (unused)
 
     # evaluation
@@ -72,6 +73,8 @@ def make_run_name(cfg: "TrainConfig") -> str:
     ]
     if cfg.res_leak_min < 1.0:
         parts.append(f"leak{cfg.res_leak_min:g}")
+    if cfg.res_mode != "tanh":
+        parts.append(cfg.res_mode)
     if cfg.res_depth_growth != 1.0:
         parts.append(f"G{cfg.res_depth_growth:g}")
     return "_".join(parts)
