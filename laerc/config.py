@@ -19,6 +19,7 @@ class TrainConfig:
     res_scale: str = "radius"  # "radius" (true spectral radius) | "norm" (v0.1 behaviour)
     use_reservoir: bool = True
     res_leak_min: float = 1.0  # < 1: leaky multi-timescale reservoir, leak rates log-spaced in [res_leak_min, 1]
+    res_depth_growth: float = 1.0  # > 1: block k's timescales are res_depth_growth**k times longer (geometric depth)
 
     # optimization
     batch: int = 8
@@ -69,6 +70,10 @@ def make_run_name(cfg: "TrainConfig") -> str:
         f"RMLP{cfg.res_mlp_mult:g}",
         f"FF{cfg.ffn_mult:g}",
     ]
+    if cfg.res_leak_min < 1.0:
+        parts.append(f"leak{cfg.res_leak_min:g}")
+    if cfg.res_depth_growth != 1.0:
+        parts.append(f"G{cfg.res_depth_growth:g}")
     return "_".join(parts)
 
 
