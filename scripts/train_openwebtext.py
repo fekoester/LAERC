@@ -28,6 +28,9 @@ def build_argparser():
     ap.add_argument("--res_radius", type=float, default=0.9)
     ap.add_argument("--res_leak_min", type=float, default=1.0,
                     help="< 1: multi-timescale leaky reservoir, per-unit leak rates log-spaced in [this, 1]")
+    ap.add_argument("--res_mode", type=str, default="tanh", choices=["tanh", "diag"],
+                    help="tanh: nonlinear echo-state reservoir; diag: frozen linear reservoir in complex-diagonal "
+                         "form, computed in parallel over the sequence (much faster on GPU)")
     ap.add_argument("--res_depth_growth", type=float, default=1.0,
                     help="> 1: geometric depth schedule, block k's reservoir timescales are this**k times longer")
     ap.add_argument("--res_scale", type=str, default="radius", choices=["radius", "norm"],
@@ -53,7 +56,7 @@ def build_argparser():
 
     # hardware
     ap.add_argument("--compile", action="store_true")
-    ap.add_argument("--amp", action="store_true", help="bf16 autocast on CUDA")
+    ap.add_argument("--amp", action="store_true", help="mixed precision on CUDA (bf16 on Ampere+, fp16 + loss scaling on T4/P100)")
 
     # evaluation / resume
     ap.add_argument("--eval_interval_steps", type=int, default=500, help="validation every N steps (0: per epoch)")
@@ -88,6 +91,7 @@ def main():
         res_scale=args.res_scale,
         res_leak_min=args.res_leak_min,
         res_depth_growth=args.res_depth_growth,
+        res_mode=args.res_mode,
         use_reservoir=not args.no_reservoir,
         batch=args.batch,
         accum=args.accum,

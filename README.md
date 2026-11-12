@@ -65,6 +65,29 @@ The effect, measured in a test: perturb the first of 150 tokens in an untrained 
 
 This makes the *horizon* long, not the *recall* exact. Each block still has a fixed state size $R$, and an echo-state network's linear memory capacity is bounded, $\sum_k \mathrm{MC}_k \le R$. So the further back the context, the coarser the summary: the resolution falls off roughly like $1/t$. Gist and topic survive, but copying an exact token from 50k tokens ago does not. That needs a state that grows with context, such as a KV cache, or a retrieval side channel.
 
+### Linear diagonal reservoir (`--res_mode diag`)
+
+The tanh reservoir has to run one token after another: every step multiplies by the $R\times R$ matrix $W$, and the leaky variant does this in a Python loop. `--res_mode diag` instead uses a frozen **linear** reservoir and writes it directly in its eigenbasis. For a linear reservoir $h_t = W h_{t-1} + U x_t$, diagonalising $W$ gives exactly
+
+$$
+\tilde h_t = \lambda \odot \tilde h_{t-1} + \gamma \odot B\,\mathrm{LN}(x_t), \qquad \text{features} = [\,\mathrm{Re}\,\tilde h_t,\ \mathrm{Im}\,\tilde h_t\,] \in \mathbb{R}^{R},
+$$
+
+with $R/2$ complex modes. Each mode $\lambda_i = e^{-1/\tau_i + i\theta_i}$ has its timescale set the same way as the leaky reservoir's: $\tau_i = \tau_\rho / a_i$, where $\tau_\rho = 1/\ln(1/\rho)$, and the $a_i$ are log-spaced in [`res_leak_min`, 1] and divided by $g^k$ under `--res_depth_growth`. The phases are uniform in $[0,\pi]$, and $\gamma_i = \sqrt{1-|\lambda_i|^2}$ gives every mode unit variance however slow it is. $B$, $\lambda$ and $\gamma$ are random and frozen, so the number of trainable parameters is the same as in the tanh model.
+
+Because the recurrence is diagonal and constant, the whole sequence is computed at once (`diag_scan`). Within chunks of 32 tokens it is one small Toeplitz matmul per mode, $\lambda^{\,i-j}$ for $i \ge j$, and a loop over $T/32$ carries chains the chunks. Only non-negative powers of $\lambda$ appear, so it is numerically stable. The work is $O(BTRC)$ with no $R\times R$ matmul at all, compared with $O(BTR^2)$ done sequentially for the tanh reservoir. Incremental generation still carries the state (now complex), and feeding a sequence in pieces gives exactly the same logits.
+
+The trade-off: the reservoir itself is now linear. All the nonlinearity comes from the readout MLP, the gate and the FFN, which is how linear recurrent networks such as S4, LRU and Mamba are built (there with trained rather than frozen dynamics). Linear reservoirs have the largest linear memory capacity, while the tanh reservoir also mixes features nonlinearly. Which of the two matters more for language modelling is an empirical question: `benchmarks/run_benchmark.py` has a `laerc_diag` run.
+
+**Speed.** Measured with `python benchmarks/speed.py` (forward + backward on random tokens). On a 2-core CPU:
+
+| D, L, T, B | FFN only | tanh (fused `nn.RNN`) | tanh leaky (loop) | diag |
+|---|---|---|---|---|
+| 128, 4, 512, 4 | 16.0k tok/s | 4.7k | 1.5k | 4.6k |
+| 64, 4, 1024, 4 | – | 7.4k | 1.7k | 8.9k |
+
+On a CPU, `diag` is 3–5× faster than the leaky reservoir and about as fast as the fused tanh RNN. On a GPU the gap should be much larger, because the tanh path is still $T$ sequential steps per layer while `diag` is a few large parallel kernels. That hasn't been measured yet; `benchmarks/speed.py` prints the numbers for whatever GPU you run it on.
+
 Since everything except the reservoir acts on one token at a time, the model can generate **incrementally**. `sample.py` carries each block's reservoir state forward, so every new token costs one step instead of a pass over the whole sequence (15× faster for 500 tokens on CPU). Feeding a sequence in pieces gives exactly the same logits as feeding it at once, and a test checks this.
 
 ## Results: Shakespeare, ~200k parameters, 1,024-token BPE
@@ -193,6 +216,21 @@ A run directory contains:
 
 Continue a run with `--resume path/to/model_stepN.pt`.
 
+### Free GPUs (Kaggle / Colab)
+
+Models with a few million parameters fit easily on the free notebook GPUs, which are a T4 or a P100 with 16 GB. In a Kaggle or Colab notebook with the GPU enabled:
+
+```bash
+!git clone https://github.com/fekoester/LAERC.git && cd LAERC && pip install -q -e .
+!cd LAERC && python benchmarks/speed.py --emb 256 --layers 8 --seq 1024 --batch 8 --amp
+!cd LAERC && mkdir -p data/raw && curl -sL https://raw.githubusercontent.com/fekoester/Shakespeare_Res/main/data/shakespeare.txt -o data/raw/shakespeare.txt
+!cd LAERC && python scripts/prepare_bpe_tokens.py --raw_dir data/raw --out_dir data/bpe1024 --vocab_size 1024
+!cd LAERC && python scripts/train_openwebtext.py --data_dir data/bpe1024 --amp --res_mode diag \
+    --res_leak_min 0.1 --res_depth_growth 4 --emb 256 --layers 8 --seq 512 --batch 32 --epochs 5
+```
+
+`--amp` uses bf16 on Ampere and newer GPUs. The T4 and P100 have no bf16, so there it falls back to fp16 with loss scaling; plain bf16 would be emulated and slow on those cards. On Kaggle, write checkpoints under `/kaggle/working` so they survive the session (`--ckpt_dir /kaggle/working/ck`).
+
 ## OpenWebText
 
 ```bash
@@ -211,13 +249,20 @@ Tokens are streamed to disk, so 100k documents (about 113M tokens) need little R
 | group | flags |
 |---|---|
 | data | `--data_dir`, `--seq`, `--vocab` (taken from `meta.json` when present) |
-| model | `--emb`, `--layers`, `--resv_mult` (R = mult·D), `--res_mlp_mult`, `--ffn_mult`, `--res_radius`, `--res_scale {radius,norm}`, `--res_leak_min` (< 1: multi-timescale), `--res_depth_growth` (> 1: geometric depth schedule), `--no_reservoir` |
+| model | `--emb`, `--layers`, `--resv_mult` (R = mult·D), `--res_mlp_mult`, `--ffn_mult`, `--res_radius`, `--res_scale {radius,norm}`, `--res_leak_min` (< 1: multi-timescale), `--res_depth_growth` (> 1: geometric depth schedule), `--res_mode {tanh,diag}`, `--no_reservoir` |
 | optimization | `--batch`, `--accum`, `--lr`, `--weight_decay`, `--grad_clip`, `--beta2`, `--epochs`, `--steps_per_epoch` |
 | schedule | `--no_sched`, `--warmup_frac`, `--hold_frac`, `--min_lr_ratio` |
 | evaluation | `--eval_interval_steps`, `--eval_batches`, `--resume` |
-| hardware | `--amp` (bf16 on CUDA), `--compile` |
+| hardware | `--amp` (bf16 on Ampere+, fp16 with loss scaling on T4/P100), `--compile` |
 
 Sampling options are `--temperature`, `--top_k`, `--top_p`, `--seed` and `--num_samples`.
+
+## Changes in 0.5
+
+- **New: `--res_mode diag`**, a frozen linear reservoir in complex-diagonal form that is computed in parallel over the sequence. On a CPU it is 3–5× faster than the leaky reservoir. It works with `--res_leak_min` and `--res_depth_growth`, and the benchmark has a `laerc_diag` run (not yet run).
+- **Faster training loop:** the loss is accumulated on the GPU and read back only every `--log_interval_steps`, instead of syncing on every micro-batch.
+- **`--amp` on T4/P100:** it now uses fp16 with loss scaling, because bf16 is only emulated before Ampere. TF32 matmuls are enabled on Ampere and newer.
+- **New: `benchmarks/speed.py`** for throughput, and a section on free Kaggle/Colab GPUs.
 
 ## Changes in 0.4
 

@@ -73,3 +73,16 @@ def test_train_resume_and_sample(data_dir, tmp_path):
                           str(tmp_path / "ck"), "--prompt", "To be", "--max_tokens", "10", "--seed", "0",
                           "--top_p", "0.9"], capture_output=True, text=True, check=True)
     assert res.stdout.startswith("To be")
+
+
+def test_train_and_sample_diag_reservoir(data_dir, tmp_path):
+    c = finalize_config(TrainConfig(data_dir=data_dir, seq=16, emb=16, layers=2, batch=4, accum=2, lr=3e-3,
+                                    epochs=1, steps_per_epoch=4, eval_interval_steps=2, eval_batches=2,
+                                    log_interval_steps=2, ckpt_dir=str(tmp_path / "ck"), flush_every=1,
+                                    res_mode="diag", res_leak_min=0.1, res_depth_growth=4.0))
+    out = train(c)
+    assert out["steps"] == 4 and np.isfinite(out["best_val_loss"])
+    res = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "sample.py"), "--ckpt_dir",
+                          str(tmp_path / "ck"), "--prompt", "To be", "--max_tokens", "10", "--seed", "0"],
+                         capture_output=True, text=True, check=True)
+    assert res.stdout.startswith("To be")
