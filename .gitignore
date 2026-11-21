@@ -30,3 +30,6 @@ Thumbs.db
 
 # Benchmark checkpoints
 results/*/ckpt/
+
+# nohup progress logs (results are in results/*/results.md)
+log_*.txt
